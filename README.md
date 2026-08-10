@@ -610,6 +610,19 @@ Picker screens use `↑↓`, `Enter`, `Esc`, and type-to-filter. The full-screen
 
 Agents are markdown files with YAML frontmatter and a system prompt body. They define the specialist that will run in the child Pi process.
 
+### Named main agents
+
+The same agent definitions can also configure the interactive main session:
+
+```bash
+pi --agent leader
+pi --agent reviewer
+```
+
+The flag uses normal agent discovery and precedence, including project overrides and aliases. The selected definition remains available to the `subagent` tool; no duplicate role file is required. The active name is stored in the session and restored by `/resume` and `/reload`.
+
+Main sessions apply `model`, `thinking`, `tools`, `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, `skills`, `skillPath`, and `memory`. Fields that only control child execution, such as `async`, `timeoutMs`, `turnBudget`, `acceptance`, `output`, and `subagentOnlyExtensions`, continue to apply only when the definition is launched as a subagent.
+
 Agent locations, lowest to highest priority:
 
 | Scope | Path |

@@ -53,6 +53,7 @@ import { formatDuration, shortenPath } from "../shared/formatters.ts";
 import { loadConfig, resolveAsyncByDefault } from "./config.ts";
 import { buildSubagentToolDescription } from "./tool-description.ts";
 import { syncMissionFromAsyncCompletion } from "../missions/lifecycle.ts";
+import { registerNamedMainAgent } from "./main-agent.ts";
 import {
 	type Details,
 	type SubagentState,
@@ -310,6 +311,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	if (process.env[SUBAGENT_CHILD_ENV] === "1") {
 		return;
 	}
+	registerNamedMainAgent(pi);
 	const globalStore = globalThis as Record<string, unknown>;
 	const runtimeCleanupStoreKey = "__piSubagentRuntimeCleanup";
 	const previousRuntimeCleanup = globalStore[runtimeCleanupStoreKey];
