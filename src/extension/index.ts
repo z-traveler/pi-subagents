@@ -87,6 +87,7 @@ import { restoreForegroundRunHistory } from "../runs/foreground/foreground-histo
 import { createInterruptedElsewhereCollector } from "../runs/background/interrupted-elsewhere.ts";
 import { resolveMissionStoreLocation } from "../missions/store.ts";
 import { listRetainedChildren } from "../runs/background/retained-children.ts";
+import { registerNamedMainAgent } from "./main-agent.ts";
 import {
 	type Details,
 	type MainWindowRendererConfig,
@@ -286,6 +287,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	if (process.env[SUBAGENT_CHILD_ENV] === "1") {
 		return;
 	}
+	registerNamedMainAgent(pi);
 	const runtimeRegistry = getRuntimeRegistry();
 	setMainThinkingLevelSource(() => readMainThinkingLevel(() => pi.getThinkingLevel()));
 
