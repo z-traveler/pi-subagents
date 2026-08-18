@@ -30,6 +30,19 @@ Discovery notes:
 - Installed Pi packages can expose agent directories from either `{"pi-subagents":{"agents":["./agents"]}}` or `{"pi":{"subagents":{"agents":["./agents"]}}}` in their package manifest. Package agents load above builtins and below user/project agents.
 - Use `agentScope: "user" | "project" | "both"` to control discovery. `both` is the default, and project definitions win runtime-name collisions.
 
+## Named main agents
+
+The same agent definitions can also configure the interactive main session:
+
+```bash
+pi --agent leader
+pi --agent reviewer
+```
+
+The flag uses normal agent discovery and precedence, including project overrides and aliases. The selected definition remains available to the `subagent` tool; no duplicate role file is required. The active name is stored in the session and restored by `/resume` and `/reload`.
+
+Main sessions apply `model`, `thinking`, `tools`, `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, `skills`, `skillPath`, and `memory`. Fields that only control child execution, such as `async`, `timeoutMs`, `turnBudget`, `acceptance`, `output`, and `subagentOnlyExtensions`, continue to apply only when the definition is launched as a subagent.
+
 ## Builtin agents
 
 Builtins load at the lowest priority, so a user or project agent with the same name overrides them. They do not pin a provider model; they inherit your current Pi default model unless you set `subagents.defaultModel` or `subagents.agentOverrides.<name>.model` (see [models.md](models.md)).
