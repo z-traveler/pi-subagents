@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import registerSubagentExtension from "../../index.ts";
+import { computeMcpServerHash } from "../../src/runs/shared/mcp-direct-tool-allowlist.ts";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -33,7 +34,7 @@ test("registers --agent as the named main-agent entry point", () => {
 
 test("applies a declared agent to the main session", async () => {
 	const modulePath = pathToFileURL(path.join(projectRoot, "src", "extension", "main-agent.ts")).href;
-	const mainAgentModule = await import(modulePath).catch(() => ({}));
+	const mainAgentModule = await import(modulePath);
 	assert.equal(typeof mainAgentModule.registerNamedMainAgent, "function", "named main-agent runtime is not implemented");
 
 	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-main-agent-"));
@@ -44,6 +45,7 @@ test("applies a declared agent to the main session", async () => {
 		fs.writeFileSync(path.join(agentDir, "agents", "leader.md"), `---
 name: leader
 description: Coordinates work
+aliases: lead
 model: cliproxy/gpt-test
 thinking: high
 tools: read, subagent
@@ -60,12 +62,12 @@ Coordinate the work and verify the result.
 			model: "",
 			thinking: "",
 			tools: [] as string[],
-			sessionName: "",
+			sessionNames: [] as string[],
 		};
 		const registryModel = { provider: "cliproxy", id: "gpt-test" };
 		const pi = {
 			registerFlag() {},
-			getFlag(name: string) { return name === "agent" ? "leader" : undefined; },
+			getFlag(name: string) { return name === "agent" ? "lead" : undefined; },
 			on(name: string, handler: (event: unknown, ctx: unknown) => unknown) {
 				const current = handlers.get(name) ?? [];
 				current.push(handler);
@@ -75,7 +77,7 @@ Coordinate the work and verify the result.
 			async setModel(model: typeof registryModel) { applied.model = `${model.provider}/${model.id}`; return true; },
 			setThinkingLevel(level: string) { applied.thinking = level; },
 			setActiveTools(names: string[]) { applied.tools = names; },
-			setSessionName(name: string) { applied.sessionName = name; },
+			setSessionName(name: string) { applied.sessionNames.push(name); },
 			appendEntry() {},
 		};
 		const ctx = {
@@ -99,7 +101,7 @@ Coordinate the work and verify the result.
 		assert.equal(applied.model, "cliproxy/gpt-test");
 		assert.equal(applied.thinking, "high");
 		assert.deepEqual(applied.tools, ["read", "subagent"]);
-		assert.equal(applied.sessionName, "leader");
+		assert.deepEqual(applied.sessionNames, []);
 
 		let prompt = "Pi base prompt with project instructions and skills.";
 		for (const handler of handlers.get("before_agent_start") ?? []) {
@@ -153,6 +155,119 @@ test("rejects an unknown named main agent before applying configuration", async 
 		assert.deepEqual(handlers.get("input")?.[0]?.({}, ctx), { action: "handled" });
 	} finally {
 		fs.rmSync(ctx.cwd, { recursive: true, force: true });
+	}
+});
+
+test("rejects an unsupported named main-agent thinking level", async () => {
+	const { registerNamedMainAgent } = await import("../../src/extension/main-agent.ts");
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-main-agent-thinking-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	try {
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		fs.mkdirSync(path.join(agentDir, "agents"), { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "agents", "leader.md"), `---
+name: leader
+description: Coordinates work
+thinking: impossible
+---
+
+Leader prompt.
+`, "utf-8");
+		const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+		let thinkingApplied = false;
+		const pi = {
+			registerFlag() {},
+			getFlag() { return "leader"; },
+			on(name: string, handler: (event: unknown, ctx: unknown) => unknown) {
+				const current = handlers.get(name) ?? [];
+				current.push(handler);
+				handlers.set(name, current);
+			},
+			setThinkingLevel() { thinkingApplied = true; },
+			appendEntry() {},
+		};
+		const ctx = {
+			cwd: agentDir,
+			mode: "print",
+			modelRegistry: { getAvailable() { return []; }, find() { return undefined; } },
+			sessionManager: { getEntries() { return []; } },
+		};
+
+		registerNamedMainAgent(pi as never);
+		const start = handlers.get("session_start")?.[0];
+		assert.ok(start);
+		await assert.rejects(
+			() => start({ reason: "startup" }, ctx),
+			/unsupported thinking level 'impossible'/,
+		);
+		assert.equal(thinkingApplied, false);
+	} finally {
+		process.exitCode = undefined;
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		fs.rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("activates declared direct MCP tools in the main session", async () => {
+	const { registerNamedMainAgent } = await import("../../src/extension/main-agent.ts");
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-main-agent-mcp-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const server = { command: "mcp-server" };
+	try {
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		fs.mkdirSync(path.join(agentDir, "agents"), { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "agents", "researcher.md"), `---
+name: researcher
+description: Researches repositories
+tools: read, mcp:github/search_repositories
+---
+
+Research the request.
+`, "utf-8");
+		fs.writeFileSync(path.join(agentDir, "mcp.json"), JSON.stringify({
+			mcpServers: { github: server },
+		}), "utf-8");
+		fs.writeFileSync(path.join(agentDir, "mcp-cache.json"), JSON.stringify({
+			version: 1,
+			servers: {
+				github: {
+					configHash: computeMcpServerHash(server),
+					tools: [{ name: "search_repositories" }],
+					resources: [],
+					cachedAt: Date.now(),
+				},
+			},
+		}), "utf-8");
+
+		const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+		let activeTools: string[] = [];
+		const pi = {
+			registerFlag() {},
+			getFlag() { return "researcher"; },
+			on(name: string, handler: (event: unknown, ctx: unknown) => unknown) {
+				const current = handlers.get(name) ?? [];
+				current.push(handler);
+				handlers.set(name, current);
+			},
+			setActiveTools(names: string[]) { activeTools = names; },
+			appendEntry() {},
+		};
+		const ctx = {
+			cwd: agentDir,
+			modelRegistry: { getAvailable() { return []; }, find() { return undefined; } },
+			sessionManager: { getEntries() { return []; } },
+		};
+
+		registerNamedMainAgent(pi as never);
+		const start = handlers.get("session_start")?.[0];
+		assert.ok(start);
+		await start({ reason: "startup" }, ctx);
+		assert.deepEqual(activeTools, ["read", "github_search_repositories"]);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		fs.rmSync(agentDir, { recursive: true, force: true });
 	}
 });
 
@@ -308,7 +423,7 @@ test("injects the selected agent memory into the main prompt", async () => {
 	}
 });
 
-test("restores the named main agent when its session is resumed", async () => {
+test("restores the named main agent when its session is resumed or reloaded", async () => {
 	const { registerNamedMainAgent } = await import("../../src/extension/main-agent.ts");
 	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-main-agent-resume-"));
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -327,7 +442,6 @@ Leader prompt.
 `, "utf-8");
 
 		const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
-		let sessionName = "";
 		const pi = {
 			registerFlag() {},
 			getFlag() { return undefined; },
@@ -336,7 +450,6 @@ Leader prompt.
 				current.push(handler);
 				handlers.set(name, current);
 			},
-			setSessionName(name: string) { sessionName = name; },
 			appendEntry() {},
 		};
 		const ctx = {
@@ -351,9 +464,69 @@ Leader prompt.
 
 		registerNamedMainAgent(pi as never);
 		const handler = handlers.get("session_start")?.[0];
+		const beforeStart = handlers.get("before_agent_start")?.[0];
 		assert.ok(handler);
-		await handler({ reason: "resume" }, ctx);
-		assert.equal(sessionName, "leader");
+		assert.ok(beforeStart);
+		for (const reason of ["resume", "reload"]) {
+			await handler({ reason }, ctx);
+			assert.deepEqual(beforeStart({ systemPrompt: "Base prompt." }, ctx), {
+				systemPrompt: "Base prompt.\n\nLeader prompt.",
+			});
+		}
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		fs.rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("does not carry a named main agent into an unrelated session", async () => {
+	const { registerNamedMainAgent } = await import("../../src/extension/main-agent.ts");
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-main-agent-switch-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	try {
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		fs.mkdirSync(path.join(agentDir, "agents"), { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "agents", "leader.md"), `---
+name: leader
+description: Coordinates work
+systemPromptMode: append
+---
+
+Leader prompt.
+`, "utf-8");
+
+		const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+		let requested: string | undefined = "leader";
+		const pi = {
+			registerFlag() {},
+			getFlag() { return requested; },
+			on(name: string, handler: (event: unknown, ctx: unknown) => unknown) {
+				const current = handlers.get(name) ?? [];
+				current.push(handler);
+				handlers.set(name, current);
+			},
+			appendEntry() {},
+		};
+		const ctx = {
+			cwd: agentDir,
+			modelRegistry: { getAvailable() { return []; }, find() { return undefined; } },
+			sessionManager: { getEntries() { return []; } },
+		};
+
+		registerNamedMainAgent(pi as never);
+		const start = handlers.get("session_start")?.[0];
+		const beforeStart = handlers.get("before_agent_start")?.[0];
+		assert.ok(start);
+		assert.ok(beforeStart);
+		await start({ reason: "startup" }, ctx);
+		assert.deepEqual(beforeStart({ systemPrompt: "Base prompt." }, ctx), {
+			systemPrompt: "Base prompt.\n\nLeader prompt.",
+		});
+
+		requested = undefined;
+		await start({ reason: "new" }, ctx);
+		assert.equal(beforeStart({ systemPrompt: "Base prompt." }, ctx), undefined);
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
