@@ -678,11 +678,11 @@ export function resolveSkillsWithFallback(
 	};
 }
 
-export function buildSkillInjection(skills: ResolvedSkill[]): string {
+export function buildSkillInjection(skills: ResolvedSkill[], audience = "subagent"): string {
 	if (skills.length === 0) return "";
 
 	const lines = [
-		"The following configured skills are available to this subagent.",
+		`The following configured skills are available to this ${audience}.`,
 		"Use the read tool to load a skill's file when the task matches its description.",
 		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
 		"",
