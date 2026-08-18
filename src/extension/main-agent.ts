@@ -3,7 +3,8 @@ import { formatSkillsForPrompt, type ExtensionAPI, type ExtensionContext, type S
 import { buildAgentMemoryInjection } from "../agents/agent-memory.ts";
 import { discoverAgents, resolveAgentName, type AgentConfig } from "../agents/agents.ts";
 import { buildSkillInjection, resolveSkills } from "../agents/skills.ts";
-import { findModelInfo, toModelInfo } from "../shared/model-info.ts";
+import { resolveMcpDirectToolNames } from "../runs/shared/mcp-direct-tool-allowlist.ts";
+import { findModelInfo, THINKING_LEVELS, toModelInfo } from "../shared/model-info.ts";
 
 const MAIN_AGENT_ENTRY_TYPE = "pi-subagents:main-agent";
 
@@ -98,9 +99,19 @@ async function applyMainAgent(pi: ExtensionAPI, ctx: ExtensionContext, agent: Ag
 		if (!modelInfo || !model) throw new Error(`Main agent '${agent.name}' model '${agent.model}' is not available.`);
 		if (!await pi.setModel(model)) throw new Error(`Main agent '${agent.name}' model '${modelInfo.fullId}' is not authenticated.`);
 	}
-	if (agent.thinking !== undefined) pi.setThinkingLevel(agent.thinking === false ? "off" : agent.thinking as never);
-	if (agent.tools !== undefined) pi.setActiveTools(agent.tools);
-	pi.setSessionName(agent.name);
+	if (agent.thinking !== undefined) {
+		const thinking = agent.thinking === false
+			? "off"
+			: THINKING_LEVELS.find((level) => level === agent.thinking);
+		if (!thinking) throw new Error(`Main agent '${agent.name}' has unsupported thinking level '${agent.thinking}'.`);
+		pi.setThinkingLevel(thinking);
+	}
+	if (agent.tools !== undefined || agent.mcpDirectTools !== undefined) {
+		pi.setActiveTools([
+			...(agent.tools ?? []),
+			...resolveMcpDirectToolNames(agent.mcpDirectTools, ctx.cwd),
+		]);
+	}
 	pi.appendEntry(MAIN_AGENT_ENTRY_TYPE, { name: agent.name });
 }
 
@@ -114,6 +125,8 @@ export function registerNamedMainAgent(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (event, ctx) => {
+		activeAgent = undefined;
+		startupError = undefined;
 		const flag = pi.getFlag("agent");
 		const requested = typeof flag === "string" && flag.trim().length > 0
 			? flag
