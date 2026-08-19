@@ -120,6 +120,8 @@ These controls are opt-in. Avoid tight hard budgets for mutation-capable workers
 
 The result is `{ ok, errors }`. Invalid scripts return a tool error and include line and column data when available. Validation checks syntax, portable nested-async rules, literal `runs.run` and `runs.all` keys and child `baseRef` values, duplicate literal keys in one `runs.all` group, direct keyed access to a known `runs.all` result, and statically clear non-JSON boundary values. Dynamic keys and other runtime-only values are accepted without a warning. Validation does not discover agents, launch children, or create run artifacts.
 
+Workflow defaults and individual `runs.run`/`runs.all` children accept `modelClass` as the semantic alternative to a concrete `model`. Child values override workflow defaults; setting both on one child is rejected.
+
 ```js
 subagent({ workflowScript: `
   const scan = await runs.run("scan", { label: "Map codebase behavior", agent: "scout", task: "Scan the codebase" });

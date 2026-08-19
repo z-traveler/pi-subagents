@@ -117,6 +117,7 @@ export interface DelegatedSubagentExecutionParams {
 	task?: string;
 	context: "fresh" | "fork";
 	model?: string;
+	modelClass?: string;
 	cwd: string;
 	timeoutMs?: number;
 	toolBudget?: ToolBudgetConfig;
@@ -290,6 +291,7 @@ export function toSubagentDelegationExecutionParams(request: SubagentDelegationR
 		context: request.context,
 		cwd: request.cwd,
 		model: request.model,
+		...(request.modelClass ? { modelClass: request.modelClass } : {}),
 		timeoutMs: request.timeoutMs,
 		toolBudget: request.toolBudget,
 		skill: request.skill,

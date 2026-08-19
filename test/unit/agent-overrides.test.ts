@@ -131,18 +131,54 @@ describe("builtin agent overrides", () => {
 		assert.deepEqual(discoverAgents(tempProject, "both").agents.find((agent) => agent.name === "coordinator")?.allowedAgents, ["reviewer", "worker"]);
 	});
 
-	it("rejects removed fallbackModels in user agent overrides", () => {
+	it("merges named model pools by class and applies an agent modelClass override", () => {
 		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
-			subagents: { agentOverrides: { worker: { fallbackModels: ["model/backup"] } } },
+			subagents: {
+				modelPools: {
+					fast: ["openai/gpt-5-mini"],
+					smart: ["openai/gpt-5"],
+				},
+				agentOverrides: { scout: { modelClass: "fast" } },
+			},
 		});
-		assert.throws(() => discoverAgentsAll(tempProject), /removed field 'fallbackModels'; configure one model instead/u);
+		fs.mkdirSync(path.join(tempProject, ".pi"), { recursive: true });
+		writeJson(path.join(tempProject, ".pi", "settings.json"), {
+			subagents: {
+				modelPools: {
+					fast: ["anthropic/claude-haiku-4-5"],
+				},
+			},
+		});
+
+		const discovered = discoverAgents(tempProject, "both");
+		assert.deepEqual(discovered.modelPools, {
+			fast: ["anthropic/claude-haiku-4-5"],
+			smart: ["openai/gpt-5"],
+		});
+		assert.equal(discovered.agents.find((agent) => agent.name === "scout")?.modelClass, "fast");
 	});
 
-	it("rejects removed fallbackModels in project agent overrides", () => {
-		writeJson(path.join(tempProject, ".pi", "settings.json"), {
-			subagents: { agentOverrides: { worker: { fallbackModels: ["model/backup"] } } },
+	it("lets a concrete agent override replace a custom agent model class", () => {
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: {
+				modelPools: { smart: ["openai/gpt-5"] },
+				agentOverrides: { custom: { model: "anthropic/claude-haiku-4-5" } },
+			},
 		});
-		assert.throws(() => discoverAgentsAll(tempProject), /removed field 'fallbackModels'; configure one model instead/u);
+		fs.mkdirSync(path.join(tempProject, ".pi", "agents"), { recursive: true });
+		fs.writeFileSync(path.join(tempProject, ".pi", "agents", "custom.md"), `---
+name: custom
+description: Custom agent
+modelClass: smart
+model: openai/gpt-5-mini
+---
+
+Work.
+`, "utf-8");
+
+		const custom = discoverAgents(tempProject, "both").agents.find((agent) => agent.name === "custom");
+		assert.equal(custom?.model, "anthropic/claude-haiku-4-5");
+		assert.equal(custom?.modelClass, undefined);
 	});
 
 	it("lets a builtin agent inherit Pi's normal tools from an override", () => {

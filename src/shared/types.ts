@@ -622,7 +622,7 @@ export interface TimeoutRecoverySummary {
 /** Safe parent-facing subset of a timeout recovery summary. */
 export type TimeoutRecoveryProjection = Pick<TimeoutRecoverySummary, "termination" | "changedFiles" | "truncated" | "recoveryNeeded" | "reason" | "reportStatus">;
 
-export const SUBAGENT_LIFECYCLE_ARTIFACT_VERSION = 3;
+export const SUBAGENT_LIFECYCLE_ARTIFACT_VERSION = 4;
 export type SubagentLifecycleArtifactVersion = typeof SUBAGENT_LIFECYCLE_ARTIFACT_VERSION;
 
 export type ProcessTerminalState = "pending" | "observed" | "unknown" | "not-started";
@@ -801,7 +801,7 @@ export interface RunFanoutRejection extends RunFanoutBudgetSnapshot {
 export interface SteeringRecoveryDescriptor {
 	/** Captured response identity authority; absence means no declared aliases on revival. */
 	modelResponseAliases?: Record<string, string[]>;
-	version: 1;
+	version: 1 | 2;
 	launchContractDigest?: string;
 	extensionBindings?: ExtensionBindings;
 	requiredExtensions?: RequiredChildExtensionSnapshot;
@@ -817,6 +817,8 @@ export interface SteeringRecoveryDescriptor {
 	modelProvider?: string;
 	modelOverrideFromParent?: boolean;
 	modelOrigin?: "explicit" | "inherited" | "configured";
+	modelRouting?: ModelRoutingSnapshot;
+	fallbackModels?: string[];
 	fast?: boolean;
 	thinking?: string;
 	thinkingCeiling?: ThinkingLevel;
@@ -861,7 +863,7 @@ export interface SteeringRecoveryDescriptor {
 
 export type PublicNestedStepSummary = Pick<
 	NestedStepSummary,
-	"agent" | "sessionName" | "status" | "model" | "thinking" | "sessionFile" | "transcriptPath" | "transcriptError" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "toolBudget" | "toolBudgetBlocked" | "startedAt" | "endedAt" | "error" | "timedOut" | "stopped"
+	"agent" | "sessionName" | "status" | "model" | "modelRouting" | "thinking" | "sessionFile" | "transcriptPath" | "transcriptError" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "toolBudget" | "toolBudgetBlocked" | "startedAt" | "endedAt" | "error" | "timedOut" | "stopped"
 > & {
 	children?: PublicNestedRunSummary[];
 };
@@ -996,6 +998,29 @@ interface ProgressSummary {
 // ============================================================================
 // Results
 // ============================================================================
+
+export interface ModelAttempt {
+	model: string;
+	success: boolean;
+	exitCode?: number | null;
+	error?: string;
+	usage?: Usage;
+	failureCategory?: import("../runs/shared/model-fallback.ts").ModelFailureCategory;
+	failureDomain?: string;
+	effects?: import("../runs/shared/model-fallback.ts").RetryEffectClass;
+	retryMode?: "restart" | "resume";
+	nextModel?: string;
+	skippedModels?: string[];
+	failoverReason?: string;
+	retryBlockedReason?: string;
+}
+
+export interface ModelRoutingSnapshot {
+	modelClass: string;
+	source: "per-run" | "agent-override" | "agent-frontmatter";
+	poolDigest: string;
+	candidates: string[];
+}
 
 export type AcceptanceLevel = "auto" | "none" | "attested" | "checked" | "verified";
 
@@ -1271,6 +1296,9 @@ export interface SingleResult {
 	messages?: Message[];
 	usage: Usage;
 	model?: string;
+	modelRouting?: ModelRoutingSnapshot;
+	attemptedModels?: string[];
+	modelAttempts?: ModelAttempt[];
 	/** Authoritative before/after Git evidence captured by a pane-native remote machine. */
 	nativeMachine?: { provider: "herdr"; machineId: string; initialGit?: HerdrRemoteGitStatus; finalGit?: HerdrRemoteGitStatus };
 	/** Effective thinking level used by this foreground child, when known. */
@@ -1582,6 +1610,7 @@ export interface NestedStepSummary {
 	sessionName?: string;
 	status: "pending" | "running" | "complete" | "completed" | "failed" | "partial" | "paused" | "stopped" | "rejected";
 	model?: string;
+	modelRouting?: ModelRoutingSnapshot;
 	thinking?: string;
 	sessionFile?: string;
 	transcriptPath?: string;
@@ -1967,6 +1996,9 @@ export interface AsyncStatus {
 		tokens?: TokenUsage;
 		skills?: string[];
 		model?: string;
+		modelRouting?: ModelRoutingSnapshot;
+		attemptedModels?: string[];
+		modelAttempts?: ModelAttempt[];
 		thinking?: string;
 		contextLimit?: number;
 		thinkingCeiling?: ThinkingLevel;
@@ -2470,6 +2502,10 @@ export interface RunSyncOptions {
 	nestedRoute?: NestedRouteInfo;
 	/** Override the agent's default model (format: "provider/id" or just "id") */
 	modelOverride?: string;
+	/** Frozen ordered candidates resolved by model-class routing for this launch. */
+	modelCandidates?: string[];
+	/** Frozen semantic class, source, digest, and candidates for observability/resume. */
+	modelRouting?: ModelRoutingSnapshot;
 	/** Opt into priority service tier for supported native OpenAI-Codex launches. */
 	fast?: boolean;
 	/** The override came from the running parent session, not configuration. */

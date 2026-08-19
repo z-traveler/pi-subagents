@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { resultFilePath, resultPayloadPathForSessionRun } from "./result-files.ts";
-import type { AcceptanceLedger, ArtifactPaths, AsyncStatus, CostSummary, EffectsProjection, ExecutionProjection, Usage } from "../../shared/types.ts";
+import type { AcceptanceLedger, ArtifactPaths, AsyncStatus, CostSummary, EffectsProjection, ExecutionProjection, ModelAttempt, ModelRoutingSnapshot, Usage } from "../../shared/types.ts";
 import { readStatus } from "../../shared/utils.ts";
 
 export interface ImportedAsyncRoot {
@@ -24,6 +24,9 @@ export interface ImportedAsyncRootResult {
 	intercomTarget?: string;
 	model?: string;
 	requestedModel?: string;
+	modelRouting?: ModelRoutingSnapshot;
+	attemptedModels?: string[];
+	modelAttempts?: ModelAttempt[];
 	contextOverflow?: boolean;
 	totalCost?: CostSummary;
 	usage?: Usage;
@@ -65,6 +68,9 @@ interface AsyncResultFile {
 		intercomTarget?: string;
 		model?: string;
 		requestedModel?: string;
+		modelRouting?: ModelRoutingSnapshot;
+		attemptedModels?: string[];
+		modelAttempts?: ModelAttempt[];
 		contextOverflow?: boolean;
 		totalCost?: CostSummary;
 		usage?: Usage;
@@ -149,6 +155,9 @@ function outputFromTerminalStatus(root: ImportedAsyncRoot, status: AsyncStatus, 
 		...(step?.sessionFile ?? status.sessionFile ? { sessionFile: step?.sessionFile ?? status.sessionFile } : {}),
 		...(step?.model ? { model: step.model } : {}),
 		...(step?.requestedModel ? { requestedModel: step.requestedModel } : {}),
+		...(step?.modelRouting ? { modelRouting: step.modelRouting } : {}),
+		...(step?.attemptedModels ? { attemptedModels: step.attemptedModels } : {}),
+		...(step?.modelAttempts ? { modelAttempts: step.modelAttempts } : {}),
 		...(step?.contextOverflow ? { contextOverflow: true } : {}),
 		...(step?.totalCost ? { totalCost: step.totalCost } : {}),
 		...(step?.structuredOutput !== undefined ? { structuredOutput: step.structuredOutput } : {}),
@@ -174,6 +183,9 @@ function outputFromTimeout(root: ImportedAsyncRoot, status: AsyncStatus | null, 
 		...(step?.sessionFile ?? status?.sessionFile ? { sessionFile: step?.sessionFile ?? status?.sessionFile } : {}),
 		...(step?.model ? { model: step.model } : {}),
 		...(step?.requestedModel ? { requestedModel: step.requestedModel } : {}),
+		...(step?.modelRouting ? { modelRouting: step.modelRouting } : {}),
+		...(step?.attemptedModels ? { attemptedModels: step.attemptedModels } : {}),
+		...(step?.modelAttempts ? { modelAttempts: step.modelAttempts } : {}),
 		...(step?.contextOverflow ? { contextOverflow: true } : {}),
 		...(step?.totalCost ? { totalCost: step.totalCost } : {}),
 		...(step?.transcriptPath ? { transcriptPath: step.transcriptPath } : {}),
@@ -209,6 +221,9 @@ function buildImportedResult(root: ImportedAsyncRoot, status: AsyncStatus | null
 		...(child?.intercomTarget ? { intercomTarget: child.intercomTarget } : {}),
 		...(child?.model ?? step?.model ? { model: child?.model ?? step?.model } : {}),
 		...(child?.requestedModel ?? step?.requestedModel ? { requestedModel: child?.requestedModel ?? step?.requestedModel } : {}),
+		...(child?.modelRouting ?? step?.modelRouting ? { modelRouting: child?.modelRouting ?? step?.modelRouting } : {}),
+		...(child?.attemptedModels ?? step?.attemptedModels ? { attemptedModels: child?.attemptedModels ?? step?.attemptedModels } : {}),
+		...(child?.modelAttempts ?? step?.modelAttempts ? { modelAttempts: child?.modelAttempts ?? step?.modelAttempts } : {}),
 		...(child?.contextOverflow || step?.contextOverflow ? { contextOverflow: true } : {}),
 		...(child?.totalCost ?? step?.totalCost ? { totalCost: child?.totalCost ?? step?.totalCost } : {}),
 		...(usage ? { usage } : {}),

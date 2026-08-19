@@ -317,6 +317,42 @@ describe("workflow launch params", () => {
 		);
 	});
 
+	it("propagates workflow model classes, including managed worktree tasks", () => {
+		assert.deepEqual(
+			prepareWorkflowLaunchParams(
+				{ modelClass: "medium" },
+				{ agent: "worker", task: "Run" },
+				"workflow-run",
+				"defaulted",
+			),
+			{
+				agent: "worker",
+				task: "Run",
+				modelClass: "medium",
+				workflowAwaitAsync: true,
+				workflowParentRunId: "workflow-run",
+				workflowKey: "defaulted",
+			},
+		);
+		assert.deepEqual(
+			prepareWorkflowLaunchParams(
+				{ modelClass: "medium" },
+				{ agent: "worker", task: "Run", modelClass: "smart", worktree: true },
+				"workflow-run",
+				"worktree",
+			),
+			{
+				agent: "worker",
+				task: "Run",
+				modelClass: "smart",
+				worktree: true,
+				workflowAwaitAsync: true,
+				workflowParentRunId: "workflow-run",
+				workflowKey: "worktree",
+			},
+		);
+	});
+
 	it("preserves a bridge override for retained workflow children", () => {
 		assert.deepEqual(
 			prepareWorkflowLaunchParams(

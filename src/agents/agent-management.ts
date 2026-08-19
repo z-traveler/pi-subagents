@@ -40,6 +40,7 @@ import { previewDisplayText } from "../shared/display-text.ts";
 import { capabilityCeilingAgentRestrictionSources, isAgentAllowedByCapabilityCeiling, resolveCurrentSubagentCapabilityCeiling } from "../runs/shared/capability-ceiling.ts";
 import { mergeRuntimeAgents, type RuntimeAgentOwner } from "./runtime-agent-registry.ts";
 import { listExternalJobProviders } from "../api/external-job-provider.ts";
+import { parseModelClass } from "../shared/model-routing.ts";
 
 type ManagementAction = "list" | "get" | "models" | "create" | "update" | "delete" | "eject" | "disable" | "enable" | "reset";
 type ManagementScope = "user" | "project";
@@ -224,6 +225,13 @@ function modelWarning(ctx: ManagementContext, model: string | undefined): string
 	return `Warning: model '${model}' is not in the current model registry. Run subagent({ action: "models" }) to list valid provider/id selectors, then use the exact provider/id form (bare ids resolve only when unique).`;
 }
 
+function fallbackModelsWarning(ctx: ManagementContext, fallbackModels: string[] | undefined): string | undefined {
+	if (!fallbackModels || fallbackModels.length === 0) return undefined;
+	const available = new Set(ctx.modelRegistry.getAvailable().flatMap((m) => [`${m.provider}/${m.id}`, m.id]));
+	const missing = fallbackModels.filter((model) => !available.has(model));
+	return missing.length ? `Warning: fallback models not in the current model registry: ${missing.join(", ")}.` : undefined;
+}
+
 function skillsWarning(cwd: string, agent: Pick<AgentConfig, "skills" | "skillPath" | "filePath">): string | undefined {
 	if (!agent.skills?.length) return undefined;
 	const { missing } = resolveSkills(
@@ -256,6 +264,10 @@ export function editableAgentConfig(agent: AgentConfig): AgentConfig {
 	const withoutSettingsDefaults = (config: AgentConfig): AgentConfig => {
 		if (!frontmatterFields) return config;
 		const next = { ...config };
+		if (!hasDeclaredField("modelClass")) {
+			delete next.modelClass;
+			delete next.modelClassSource;
+		}
 		if (!hasDeclaredField("model")) delete next.model;
 		if (!hasDeclaredField("thinking")) delete next.thinking;
 		return next;
@@ -266,7 +278,10 @@ export function editableAgentConfig(agent: AgentConfig): AgentConfig {
 		output: _output,
 		outputMode: _outputMode,
 		defaultReads: _defaultReads,
+		modelClass: _modelClass,
+		modelClassSource: _modelClassSource,
 		model: _model,
+		fallbackModels: _fallbackModels,
 		fast: _fast,
 		thinking: _thinking,
 		systemPromptMode: _systemPromptMode,
@@ -302,7 +317,9 @@ export function editableAgentConfig(agent: AgentConfig): AgentConfig {
 		...(base.output !== undefined ? { output: base.output } : {}),
 		...(base.outputMode !== undefined ? { outputMode: base.outputMode } : {}),
 		...(base.defaultReads !== undefined ? { defaultReads: [...base.defaultReads] } : {}),
+		...(base.modelClass !== undefined && hasDeclaredField("modelClass") ? { modelClass: base.modelClass } : {}),
 		...(base.model !== undefined && hasDeclaredField("model") ? { model: base.model } : {}),
+		...(base.fallbackModels !== undefined ? { fallbackModels: [...base.fallbackModels] } : {}),
 		...(base.fast !== undefined ? { fast: base.fast } : {}),
 		...(base.thinking !== undefined && hasDeclaredField("thinking") ? { thinking: base.thinking } : {}),
 		systemPromptMode: base.systemPromptMode,
@@ -349,7 +366,9 @@ export function preservedAgentFrontmatterFields(agent: AgentConfig, cfg: Record<
 	if (hasKey(cfg, "aliases")) changed("alias", "aliases");
 	if (hasKey(cfg, "systemPrompt")) changed("systemPrompt");
 	if (hasKey(cfg, "runner")) changed("runner");
+	if (hasKey(cfg, "modelClass")) changed("modelClass");
 	if (hasKey(cfg, "model")) changed("model");
+	if (hasKey(cfg, "fallbackModels")) changed("fallbackModels");
 	if (hasKey(cfg, "tools")) changed("tools");
 	if (hasKey(cfg, "excludeTools")) changed("excludeTools");
 	if (hasKey(cfg, "skills")) changed("skill", "skills");
@@ -458,7 +477,34 @@ function applyAgentConfig(target: AgentConfig, cfg: Record<string, unknown>): st
 			else delete target.model;
 		} else return "config.model must be a string or false when provided.";
 	}
-	if (hasKey(cfg, "fallbackModels")) return "config.fallbackModels was removed; configure one model instead.";
+	if (hasKey(cfg, "modelClass")) {
+		if (cfg.modelClass === false || cfg.modelClass === "") {
+			delete target.modelClass;
+			delete target.modelClassSource;
+		} else {
+			try {
+				target.modelClass = parseModelClass(cfg.modelClass, "config.modelClass");
+				target.modelClassSource = "frontmatter";
+			} catch (error) {
+				return error instanceof Error ? error.message : String(error);
+			}
+		}
+	}
+	if (hasKey(cfg, "fallbackModels")) {
+		if (cfg.fallbackModels === false || cfg.fallbackModels === "") delete target.fallbackModels;
+		else if (typeof cfg.fallbackModels === "string") {
+			const models = parseCsv(cfg.fallbackModels);
+			if (models.length) target.fallbackModels = models;
+			else delete target.fallbackModels;
+		} else if (Array.isArray(cfg.fallbackModels)) {
+			const models = cfg.fallbackModels
+				.filter((value): value is string => typeof value === "string")
+				.map((value) => value.trim())
+				.filter(Boolean);
+			if (models.length) target.fallbackModels = [...new Set(models)];
+			else delete target.fallbackModels;
+		} else return "config.fallbackModels must be a comma-separated string, string array, or false when provided.";
+	}
 	if (hasKey(cfg, "tools")) {
 		if (cfg.tools === false || cfg.tools === "") { delete target.tools; delete target.mcpDirectTools; }
 		else if (typeof cfg.tools === "string") {
@@ -611,6 +657,7 @@ function applyAgentConfig(target: AgentConfig, cfg: Record<string, unknown>): st
 			target.tools?.length || target.mcpDirectTools?.length ? "tools" : undefined,
 			target.excludeTools?.length ? "excludeTools" : undefined,
 			target.model ? "model" : undefined,
+			target.fallbackModels?.length ? "fallbackModels" : undefined,
 			target.thinking ? "thinking" : undefined,
 			target.extensions?.length ? "extensions" : undefined,
 			target.subagentOnlyExtensions?.length ? "subagentOnlyExtensions" : undefined,
@@ -826,7 +873,7 @@ function agentCapabilityRow(agent: AgentConfig, options: { executable: boolean; 
 		aliases: agent.aliases ? [...agent.aliases] : undefined,
 		runner: agentCapabilityRunner(agent, options.providerNames, options.externalCliAvailability),
 		tools: agentCapabilityTools(agent),
-		model: presentDetails({ value: agent.model, thinking: agent.thinking }),
+		model: presentDetails({ value: agent.model, fallbackModels: agent.fallbackModels, thinking: agent.thinking }),
 		execution: presentDetails({ defaultAsync: agent.defaultAsync, timeoutMs: agent.defaultTimeoutMs }),
 		acceptance: presentDetails({ policy: agent.defaultAcceptance, role: agent.acceptanceRole }),
 		output: presentDetails({ path: agent.output, mode: agent.outputMode }),
@@ -928,7 +975,9 @@ function formatAgentDetail(agent: AgentConfig): string {
 		lines.push(`Package: ${agent.packageName}`);
 	}
 	if (agent.aliases?.length) lines.push(`Aliases: ${agent.aliases.join(", ")}`);
+	if (agent.modelClass) lines.push(`Model class: ${agent.modelClass}`);
 	if (agent.model) lines.push(`Model: ${agent.model}`);
+	if (agent.fallbackModels?.length) lines.push(`Fallback models: ${agent.fallbackModels.join(", ")}`);
 	if (tools.length) lines.push(`Tools: ${tools.join(", ")}`);
 	if (agent.excludeTools?.length) lines.push(`Excluded tools: ${agent.excludeTools.join(", ")}`);
 	if (agent.skills?.length) lines.push(`Skills: ${agent.skills.join(", ")}`);
@@ -1069,7 +1118,19 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 			lines.push("Effective model:");
 			lines.push(`  ${resolvedModel ?? "(unresolved)"}`);
 			lines.push(`Source: ${source}`);
+			if (agent.modelClass) {
+				lines.push(`Model class: ${agent.modelClass}`);
+				lines.push(`Class pool: ${(discovered.modelPools?.[agent.modelClass] ?? []).join(" -> ") || "(unmapped; concrete fallback applies)"}`);
+				const poolSource = discovered.modelPoolSources?.[agent.modelClass];
+				if (poolSource) lines.push(`Class pool source: ${poolSource.scope} (${poolSource.path})`);
+			}
 			lines.push(`Thinking: ${effectiveThinking ?? "default"}`);
+			if (agent.fallbackModels?.length) {
+				lines.push("Fallback models:");
+				for (const fallback of agent.fallbackModels) {
+					lines.push(`  ${resolveSubagentModelOverride(fallback, currentModel, availableModels, agent.modelProvider ?? preferredProvider) ?? fallback}`);
+				}
+			}
 			if (agent.override) {
 				lines.push("Override file:");
 				lines.push(`  ${agent.override.path}`);
@@ -1085,10 +1146,20 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 			break;
 		}
 		lines.push(name);
+		if (agent.modelClass) {
+			lines.push(`  modelClass: ${agent.modelClass}`);
+			lines.push(`  pool: ${(discovered.modelPools?.[agent.modelClass] ?? []).join(" -> ") || "(unmapped)"}`);
+		}
 		lines.push("  model:");
 		lines.push(`    ${resolvedModel ?? "(unresolved)"}`);
 		lines.push(`  source: ${source}`);
 		lines.push(`  thinking: ${effectiveThinking ?? "default"}`);
+		if (agent.fallbackModels?.length) {
+			lines.push("  fallback models:");
+			for (const fallback of agent.fallbackModels) {
+				lines.push(`    ${resolveSubagentModelOverride(fallback, currentModel, availableModels, agent.modelProvider ?? preferredProvider) ?? fallback}`);
+			}
+		}
 		if (agent.override) {
 			lines.push("  override file:");
 			lines.push(`    ${agent.override.path}`);
@@ -1178,6 +1249,8 @@ export function handleCreate(params: ManagementParams, ctx: ManagementContext): 
 	if (profileError) return result(profileError, true);
 	const mw = modelWarning(ctx, agent.model);
 	if (mw) warnings.push(mw);
+	const fmw = fallbackModelsWarning(ctx, agent.fallbackModels);
+	if (fmw) warnings.push(fmw);
 	const sw = skillsWarning(ctx.cwd, agent);
 	if (sw) warnings.push(sw);
 	fs.writeFileSync(targetPath, serializeAgent(agent), "utf-8");
@@ -1232,6 +1305,10 @@ export function handleUpdate(params: ManagementParams, ctx: ManagementContext): 
 	if (hasKey(cfg, "model")) {
 		const mw = modelWarning(ctx, updated.model);
 		if (mw) warnings.push(mw);
+	}
+	if (hasKey(cfg, "fallbackModels")) {
+		const fmw = fallbackModelsWarning(ctx, updated.fallbackModels);
+		if (fmw) warnings.push(fmw);
 	}
 	if (hasKey(cfg, "skills") || hasKey(cfg, "skillPath")) {
 		const sw = skillsWarning(ctx.cwd, updated);

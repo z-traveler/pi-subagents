@@ -70,6 +70,7 @@ describe("registered subagent tool description", () => {
 
 	it("keeps execution, authority, evidence and recovery contracts in every built-in mode", () => {
 		for (const description of [DEFAULT_SUBAGENT_TOOL_DESCRIPTION, FULL_SUBAGENT_TOOL_DESCRIPTION, COMPACT_SUBAGENT_TOOL_DESCRIPTION]) {
+			assert.match(description, /modelClass.*semantic tier.*never set both.*stays inside that class/i);
 			for (const contract of [
 				/one child with \{agent,task\?\}/,
 				/exactly one of \{workflowScript,args\?\}, \{workflowScriptPath,args\?\} or \{workflow,args\}/,

@@ -338,7 +338,7 @@ Live update events are bounded progress snapshots, not patches, so consumers sho
 Bounds:
 
 - Schemas are capped at 64 KiB; tasks and returned text/structured values are capped at 1 MiB, with smaller bounds on identity/configuration strings and a maximum `timeoutMs` of 2,147,483,647.
-- Structured delegation accepts `toolBudget: { hard: 0, block: "*" }` to block the first tool call and run a zero-tool leaf; ordinary model-facing/configured budgets keep their existing minimum of one.
+- Structured delegation accepts `modelClass` as an alternative to `model`, and accepts `toolBudget: { hard: 0, block: "*" }` to block the first tool call and run a zero-tool leaf; ordinary model-facing/configured budgets keep their existing minimum of one.
 - `intercomBridge` optionally replaces the global bridge config for one delegation, for example `{ mode: "off" }` when no supervisor session will answer the child. Pass the same value to `resolveSubagentLaunchContract` to compare `launchContractDigest` against the terminal response.
 - The foreground bridge retains up to 8,192 exact pending-cancellation and settled-attempt identities per extension context. If either history fills, it fails closed with `unavailable_context` for later starts rather than evicting identity facts; lifecycle reset clears the bounded history.
 

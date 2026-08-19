@@ -120,10 +120,10 @@ describe("child watchdog status helpers", () => {
 		);
 	});
 
-	it("rejects removed fallbackModels in child watchdog config", () => {
+	it("rejects malformed child watchdog fallback models", () => {
 		assert.throws(
-			() => decodeChildWatchdogConfig(JSON.stringify({ enabled: false, fallbackModels: ["model/backup"] })),
-			/fallbackModels was removed; configure one model instead/,
+			() => decodeChildWatchdogConfig(JSON.stringify({ enabled: true, fallbackModels: [null] })),
+			/fallbackModels must be an array of non-empty strings/,
 		);
 	});
 

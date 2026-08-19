@@ -198,7 +198,7 @@ function validateDefinition(value: unknown): RuntimeAgentDefinition {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Runtime agent definition must be an object.");
 	const definition = value as Record<string, unknown>;
 	const supported = new Set([
-		"description", "systemPrompt", "aliases", "tools", "excludeTools", "allowNestedSubagents", "mcpDirectTools", "model", "thinking",
+		"description", "systemPrompt", "aliases", "tools", "excludeTools", "allowNestedSubagents", "mcpDirectTools", "model", "fallbackModels", "thinking",
 		"systemPromptMode", "inheritProjectContext", "inheritGlobalContext", "inheritSkills", "defaultContext", "defaultAsync", "defaultTimeoutMs",
 		"defaultToolTimeoutMs", "defaultAcceptance", "acceptanceRole", "runner", "machine", "skills", "skillPath",
 		"extensions", "subagentOnlyExtensions", "mutationTools", "output", "outputMode", "defaultReads", "defaultProgress", "interactive",
@@ -222,7 +222,7 @@ function validateDefinition(value: unknown): RuntimeAgentDefinition {
 	const allowNestedSubagents = validateBoolean(definition.allowNestedSubagents, "Runtime agent definition allowNestedSubagents");
 	const mcpDirectTools = validateStringList(definition.mcpDirectTools, "Runtime agent definition mcpDirectTools");
 	const model = validateOptionalString(definition.model, "Runtime agent definition model");
-	if ((definition as Record<string, unknown>).fallbackModels !== undefined) throw new Error("Runtime agent definition fallbackModels was removed; configure one model instead.");
+	const fallbackModels = validateStringList(definition.fallbackModels, "Runtime agent definition fallbackModels");
 	const inheritProjectContext = validateBoolean(definition.inheritProjectContext, "Runtime agent definition inheritProjectContext");
 	const inheritGlobalContext = validateBoolean(definition.inheritGlobalContext, "Runtime agent definition inheritGlobalContext");
 	const inheritSkills = validateBoolean(definition.inheritSkills, "Runtime agent definition inheritSkills");
@@ -253,6 +253,7 @@ function validateDefinition(value: unknown): RuntimeAgentDefinition {
 		...(allowNestedSubagents !== undefined ? { allowNestedSubagents } : {}),
 		...(mcpDirectTools ? { mcpDirectTools } : {}),
 		...(model ? { model } : {}),
+		...(fallbackModels ? { fallbackModels } : {}),
 		...(thinking !== undefined ? { thinking: thinking as string | false } : {}),
 		...(systemPromptMode !== undefined ? { systemPromptMode: systemPromptMode as "append" | "replace" } : {}),
 		...(inheritProjectContext !== undefined ? { inheritProjectContext } : {}),

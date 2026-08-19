@@ -5,7 +5,7 @@ import { syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { readAsyncRecoveryDescriptor } from "../../src/runs/background/async-resume.ts";
+import { readAsyncRecoveryDescriptor, resolveRecoveryModelCandidates } from "../../src/runs/background/async-resume.ts";
 import { executeAsyncSingle } from "../../src/runs/background/async-execution.ts";
 import { createRunFanoutBudget } from "../../src/runs/shared/run-fanout-budget.ts";
 import { DIRS } from "../../src/shared/types.ts";
@@ -45,6 +45,61 @@ describe("async recovery descriptor", () => {
 			syncBuiltinESMExports();
 			fs.rmSync(root, { recursive: true, force: true });
 			fs.rmSync(asyncDir, { recursive: true, force: true });
+		}
+	});
+
+	it("resumes with the session-owning final model followed by untried frozen candidates", () => {
+		assert.deepEqual(resolveRecoveryModelCandidates("provider/second", {
+			version: 2,
+			runFanoutBudget: runFanoutBudget("run-candidates"),
+			sourceRunId: "run-candidates",
+			agent: "worker",
+			cwd: "/repo",
+			model: "provider/first",
+			modelRouting: {
+				modelClass: "smart",
+				source: "per-run",
+				poolDigest: "digest",
+				candidates: ["provider/first", "provider/second", "other/third"],
+			},
+			systemPromptMode: "replace",
+			inheritProjectContext: false,
+			inheritSkills: false,
+			outputMode: "inline",
+			maxSubagentDepth: 2,
+			share: false,
+		},), ["provider/second", "other/third"]);
+	});
+
+	it("accepts a v2 frozen model-routing snapshot while retaining v1 compatibility", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-recovery-v2-routing-"));
+		try {
+			fs.writeFileSync(path.join(root, "recovery-descriptor.json"), JSON.stringify({
+				version: 2,
+				runFanoutBudget: runFanoutBudget("run-v2"),
+				sourceRunId: "run-v2",
+				agent: "worker",
+				cwd: root,
+				model: "provider/primary",
+				modelRouting: {
+					modelClass: "smart",
+					source: "per-run",
+					poolDigest: "digest",
+					candidates: ["provider/primary", "other/fallback"],
+				},
+				systemPromptMode: "replace",
+				inheritProjectContext: false,
+				inheritSkills: false,
+				outputMode: "inline",
+				maxSubagentDepth: 2,
+				share: false,
+			}), "utf-8");
+
+			const descriptor = readAsyncRecoveryDescriptor(root);
+			assert.equal(descriptor?.version, 2);
+			assert.deepEqual(descriptor?.modelRouting?.candidates, ["provider/primary", "other/fallback"]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 
