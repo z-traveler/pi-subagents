@@ -3004,9 +3004,17 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			acceptance: { level: "none", reason: "descriptor persistence coverage" },
 			turnBudget: { maxTurns: 8, graceTurns: 2 },
 			agentConfig: makeAgent("worker", {
+				modelClass: "smart",
 				model: "openai/gpt-5-mini:high",
 				fallbackModels: ["anthropic/claude-sonnet-4:low"],
 			}),
+			modelCandidates: ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:low"],
+			modelRouting: {
+				modelClass: "smart",
+				source: "agent-frontmatter",
+				poolDigest: "frozen-pool-digest",
+				candidates: ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:low"],
+			},
 			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
 			availableModels: [
 				{ provider: "openai", id: "gpt-5-mini", fullId: "openai/gpt-5-mini" },
@@ -3039,8 +3047,15 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const descriptor = JSON.parse(fs.readFileSync(descriptorPath, "utf-8"));
 		assert.equal(descriptor.sourceRunId, id);
 		assert.equal(descriptor.agent, "worker");
+		assert.equal(descriptor.version, 2);
 		assert.equal(descriptor.model, "openai/gpt-5-mini:high");
 		assert.deepEqual(descriptor.fallbackModels, ["anthropic/claude-sonnet-4:low"]);
+		assert.deepEqual(descriptor.modelRouting, {
+			modelClass: "smart",
+			source: "agent-frontmatter",
+			poolDigest: descriptor.modelRouting.poolDigest,
+			candidates: ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:low"],
+		});
 		assert.equal(descriptor.cwd, tempDir);
 		assert.equal(descriptor.sessionDir, path.join(sessionRoot, `async-${id}`));
 		assert.deepEqual(descriptor.acceptance, { level: "none", reason: "descriptor persistence coverage" });
@@ -3054,6 +3069,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.lifecycleArtifactVersion, SUBAGENT_LIFECYCLE_ARTIFACT_VERSION);
 		assert.equal(payload.success, true);
 		assert.equal(payload.results[0].model, "anthropic/claude-sonnet-4:low");
+		assert.deepEqual(payload.results[0].modelRouting, descriptor.modelRouting);
 		assert.deepEqual(payload.results[0].attemptedModels, ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:low"]);
 		assert.equal(payload.results[0].modelAttempts.length, 2);
 		assert.deepEqual(payload.results[0].totalCost, { inputTokens: 110, outputTokens: 55, costUsd: 0.011 });
@@ -3232,6 +3248,13 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 				fallbackModels: ["anthropic/claude-sonnet-4:low"],
 				thinking: "high",
 			}),
+			modelCandidates: ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:low"],
+			modelRouting: {
+				modelClass: "smart",
+				source: "per-run",
+				poolDigest: "thinking-override-pool",
+				candidates: ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:low"],
+			},
 			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
 			availableModels: [
 				{ provider: "openai", id: "gpt-5-mini", fullId: "openai/gpt-5-mini" },
@@ -3254,9 +3277,12 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(run.details.asyncId, id);
 		const resultPath = await waitForAsyncResultFile(id);
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const descriptor = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "recovery-descriptor.json"), "utf-8"));
 		const firstArgs = readMockPiArgs(mockPi, 0);
 		const secondArgs = readMockPiArgs(mockPi, 1);
 		assert.equal(payload.success, true);
+		assert.deepEqual(descriptor.modelRouting.candidates, ["openai/gpt-5-mini:off", "anthropic/claude-sonnet-4:off"]);
+		assert.deepEqual(payload.results[0]?.modelRouting?.candidates, descriptor.modelRouting.candidates);
 		assert.equal(payload.results[0].model, "anthropic/claude-sonnet-4:off");
 		assert.deepEqual(payload.results[0].attemptedModels, ["openai/gpt-5-mini:off", "anthropic/claude-sonnet-4:off"]);
 		assert.equal(firstArgs[firstArgs.indexOf("--model") + 1], "openai/gpt-5-mini:off");

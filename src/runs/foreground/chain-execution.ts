@@ -81,7 +81,8 @@ import {
 	MAX_CONCURRENCY,
 	resolveChildMaxSubagentDepth,
 } from "../../shared/types.ts";
-import { resolveEffectiveSubagentModel } from "../shared/model-fallback.ts";
+import { resolveModelRouting, toModelRoutingSnapshot } from "../shared/model-fallback.ts";
+import type { ModelPools, ModelPoolSources } from "../../shared/model-routing.ts";
 import type { ModelScopeConfig } from "../shared/model-scope.ts";
 import { injectSingleOutputInstruction, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { buildWorkflowGraphSnapshot } from "../shared/workflow-graph.ts";
@@ -125,6 +126,8 @@ interface ParallelChainRunInput {
 	stepIndex: number;
 	availableModels: ModelInfo[];
 	modelScope?: ModelScopeConfig;
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
 	chainDir: string;
 	prev: string;
 	originalTask: string;
@@ -290,17 +293,25 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 	const concurrency = input.step.concurrency ?? MAX_CONCURRENCY;
 	const failFast = input.step.failFast ?? false;
 	let aborted = false;
-	const effectiveModels = input.step.parallel.map((task) => {
+	const modelRoutings = input.step.parallel.map((task) => {
 		const taskAgentConfig = input.agents.find((agent) => agent.name === task.agent);
-		return resolveEffectiveSubagentModel(
-			task.model,
-			taskAgentConfig?.model,
-			input.ctx.model,
-			input.availableModels,
-			input.ctx.model?.provider,
-			{ scope: input.modelScope },
-		);
+		if (!taskAgentConfig || taskAgentConfig.runner?.type === "external-cli") return undefined;
+		return resolveModelRouting({
+			explicitModel: task.model,
+			explicitModelClass: task.modelClass,
+			agentModel: taskAgentConfig.model,
+			agentFallbackModels: taskAgentConfig.fallbackModels,
+			agentModelClass: taskAgentConfig.modelClass,
+			agentModelClassSource: taskAgentConfig.modelClassSource === "agent-override" ? "agent-override" : "agent-frontmatter",
+			modelPools: input.modelPools,
+			modelPoolSources: input.modelPoolSources,
+			parentModel: input.ctx.model,
+			availableModels: input.availableModels,
+			preferredProvider: input.ctx.model?.provider,
+			modelScope: input.modelScope,
+		});
 	});
+	const effectiveModels = modelRoutings.map((routing) => routing?.primaryModel);
 	for (let taskIndex = 0; taskIndex < input.step.parallel.length; taskIndex++) {
 		const task = input.step.parallel[taskIndex]!;
 		input.sessionFileForTask?.(task.agent, input.globalTaskIndex + taskIndex, effectiveModels[taskIndex]);
@@ -427,6 +438,8 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				orchestratorIntercomTarget: input.orchestratorIntercomTarget,
 				nestedRoute: input.nestedRoute,
 				modelOverride: effectiveModel,
+				modelCandidates: modelRoutings[taskIndex]?.modelCandidates,
+				modelRouting: modelRoutings[taskIndex] ? toModelRoutingSnapshot(modelRoutings[taskIndex]!) : undefined,
 				availableModels: input.availableModels,
 				preferredModelProvider: input.ctx.model?.provider,
 				modelScope: input.modelScope,
@@ -524,6 +537,8 @@ interface ChainExecutionParams {
 	thinkingOverrideForTask?: (agentName: string, idx?: number, modelOverride?: string) => AgentConfig["thinking"] | undefined;
 	contextForAgent?: (agentName: string) => ContextMode;
 	modelScope?: ModelScopeConfig;
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
 	artifactsDir: string;
 	artifactConfig: ArtifactConfig;
 	includeProgress?: boolean;
@@ -607,6 +622,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 		chainSkills: chainSkillsParam,
 		chainDir: chainDirBase,
 		modelScope,
+		modelPools,
+		modelPoolSources,
 	} = params;
 	const chainSkills = chainSkillsParam ?? [];
 
@@ -854,6 +871,8 @@ ${step.message}` : ""}` }],
 					stepIndex,
 					availableModels,
 					modelScope,
+					modelPools,
+					modelPoolSources,
 					chainDir,
 					prev,
 					originalTask,
@@ -1132,6 +1151,8 @@ ${step.message}` : ""}` }],
 				stepIndex,
 				availableModels,
 				modelScope,
+				modelPools,
+				modelPoolSources,
 				chainDir,
 				prev,
 				originalTask,
@@ -1349,14 +1370,22 @@ ${step.message}` : ""}` }],
 			stepTask = prefix + stepTask + suffix;
 
 			const explicitStepModel = tuiOverride?.model ?? seqStep.model;
-			const effectiveModel = resolveEffectiveSubagentModel(
-				explicitStepModel,
-				agentConfig.model,
-				ctx.model,
+			const explicitStepModelClass = tuiOverride?.modelClass ?? seqStep.modelClass;
+			const modelRouting = agentConfig.runner?.type === "external-cli" ? undefined : resolveModelRouting({
+				explicitModel: explicitStepModel,
+				explicitModelClass: explicitStepModelClass,
+				agentModel: agentConfig.model,
+				agentFallbackModels: agentConfig.fallbackModels,
+				agentModelClass: agentConfig.modelClass,
+				agentModelClassSource: agentConfig.modelClassSource === "agent-override" ? "agent-override" : "agent-frontmatter",
+					modelPools,
+					modelPoolSources,
+				parentModel: ctx.model,
 				availableModels,
-				ctx.model?.provider,
-				{ scope: modelScope },
-			);
+				preferredProvider: ctx.model?.provider,
+				modelScope,
+			});
+			const effectiveModel = modelRouting?.primaryModel;
 
 			const outputPath = typeof behavior.output === "string"
 				? (path.isAbsolute(behavior.output) ? behavior.output : path.join(chainDir, behavior.output))
@@ -1443,6 +1472,8 @@ ${step.message}` : ""}` }],
 				orchestratorIntercomTarget,
 				nestedRoute: params.nestedRoute,
 				modelOverride: effectiveModel,
+				modelCandidates: modelRouting?.modelCandidates,
+				modelRouting: modelRouting ? toModelRoutingSnapshot(modelRouting) : undefined,
 				availableModels,
 				preferredModelProvider: ctx.model?.provider,
 				modelScope,

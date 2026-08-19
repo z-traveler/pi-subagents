@@ -4,6 +4,7 @@ import {
 import { validateToolBudgetConfig } from "../runs/shared/tool-budget.ts";
 import { resolveTurnBudgetConfig } from "../runs/shared/turn-budget.ts";
 import { cloneJsonWithinByteLimit } from "./delegation-json.ts";
+import { parseModelClass } from "../shared/model-routing.ts";
 
 export type SubagentDelegationParseResult =
 	| { ok: true; request: SubagentDelegationRequest }
@@ -18,6 +19,7 @@ const supportedFields = new Set([
 	"context",
 	"cwd",
 	"model",
+	"modelClass",
 	"thinking",
 	"timeoutMs",
 	"turnBudget",
@@ -73,6 +75,16 @@ export function parseSubagentDelegationRequest(data: unknown): SubagentDelegatio
 	if (value.model !== undefined && !nonEmptyString(value.model)) {
 		return { ok: false, ...identity, error: "model must be a non-empty string when provided." };
 	}
+	if (value.model !== undefined && value.modelClass !== undefined) {
+		return { ok: false, ...identity, error: "Delegation request cannot set both model and modelClass." };
+	}
+	if (value.modelClass !== undefined) {
+		try {
+			value.modelClass = parseModelClass(value.modelClass, "Delegation modelClass");
+		} catch (error) {
+			return { ok: false, ...identity, error: error instanceof Error ? error.message : String(error) };
+		}
+	}
 	if (value.timeoutMs !== undefined && (typeof value.timeoutMs !== "number" || !Number.isInteger(value.timeoutMs) || value.timeoutMs < 1)) {
 		return { ok: false, ...identity, error: "timeoutMs must be an integer >= 1." };
 	}
@@ -112,6 +124,9 @@ export function parseSubagentDelegationRequest(data: unknown): SubagentDelegatio
 	}
 	if (typeof value.model === "string" && Buffer.byteLength(value.model, "utf8") > MAX_SHORT_TEXT_BYTES) {
 		return { ok: false, ...identity, error: "Delegation model exceeds 1 KiB when UTF-8 encoded." };
+	}
+	if (typeof value.modelClass === "string" && Buffer.byteLength(value.modelClass, "utf8") > MAX_SHORT_TEXT_BYTES) {
+		return { ok: false, ...identity, error: "Delegation modelClass exceeds 1 KiB when UTF-8 encoded." };
 	}
 	const skillEntries = typeof value.skill === "string" ? [value.skill] : Array.isArray(value.skill) ? value.skill as string[] : [];
 	if (skillEntries.length > MAX_SKILL_ENTRIES) {

@@ -28,7 +28,8 @@ import { normalizePublicSubagentExecution } from "../../extension/public-executi
 import { runSync } from "./execution.ts";
 import { handleWatchdogToolAction, WATCHDOG_TOOL_ACTIONS } from "../../watchdog/tool-actions.ts";
 import type { MainWatchdogRuntime } from "../../watchdog/runtime.ts";
-import { buildModelCandidates, normalizeParentModel, resolveEffectiveSubagentModel, resolveModelCandidate, type ParentModel } from "../shared/model-fallback.ts";
+import { buildModelCandidates, normalizeParentModel, resolveEffectiveSubagentModel, resolveModelCandidate, resolveModelRouting, toModelRoutingSnapshot, type ModelRoutingResolution, type ParentModel } from "../shared/model-fallback.ts";
+import type { ModelPools, ModelPoolSources } from "../../shared/model-routing.ts";
 import { formatRetainedChildren, listRetainedChildren } from "../background/retained-children.ts";
 import type { ModelScopeConfig } from "../shared/model-scope.ts";
 import { aggregateParallelOutputs } from "../shared/parallel-utils.ts";
@@ -39,6 +40,7 @@ import {
 	getStepAgents,
 	isParallelStep,
 	isDynamicParallelStep,
+	isCheckpointStep,
 	resolveChainPath,
 	resolveExistingReadPaths,
 	resolveStepBehavior,
@@ -86,7 +88,7 @@ import {
 	resolveSubagentResultStatus,
 	stripDetailsOutputsForIntercomReceipt,
 } from "../../intercom/result-intercom.ts";
-import { applySteeringRecoveryAgentConfig, buildRevivedAsyncTask, resolveAsyncResumeTarget, resolveAsyncRunLocation } from "../background/async-resume.ts";
+import { applySteeringRecoveryAgentConfig, buildRevivedAsyncTask, resolveAsyncResumeTarget, resolveAsyncRunLocation, resolveRecoveryModelCandidates } from "../background/async-resume.ts";
 import { deliverCheckpointDecisionRequest, deliverInterruptRequest, readRevivalBriefs, requestAsyncSteer, type SteerDeliveryMode } from "../background/control-channel.ts";
 import { updateSteeringTarget, waitForSteeringAction } from "../background/steering.ts";
 import { steerAsyncRun } from "./async-steering-action.ts";
@@ -256,6 +258,7 @@ interface TaskParam {
 	reads?: string[] | boolean;
 	progress?: boolean;
 	model?: string;
+	modelClass?: string;
 	skill?: string | string[] | boolean;
 	outputSchema?: JsonSchemaObject;
 	acceptance?: AcceptanceInput;
@@ -324,6 +327,7 @@ export interface SubagentParamsLike {
 	artifacts?: boolean;
 	includeProgress?: boolean;
 	model?: string;
+	modelClass?: string;
 	thinking?: string | false;
 	scope?: string;
 	target?: string;
@@ -378,7 +382,7 @@ interface ExecutorDeps {
 	tempArtifactsDir: string;
 	getSubagentSessionRoot: (parentSessionFile: string | null) => string;
 	expandTilde: (p: string) => string;
-	discoverAgents: (cwd: string, scope: AgentScope) => { agents: AgentConfig[]; modelScope?: ModelScopeConfig };
+	discoverAgents: (cwd: string, scope: AgentScope) => { agents: AgentConfig[]; modelScope?: ModelScopeConfig; modelPools?: ModelPools; modelPoolSources?: ModelPoolSources };
 	allowMutatingManagementActions?: boolean;
 	kill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean;
 }
@@ -421,6 +425,8 @@ interface ExecutionContextData {
 	configToolBudget?: ResolvedToolBudget;
 	contextPolicy: AgentDefaultContextPolicy;
 	modelScope?: ModelScopeConfig;
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
 	parentModel?: ParentModel;
 	parentSessionId: string | null;
 	parentPiSessionId?: string;
@@ -428,6 +434,33 @@ interface ExecutionContextData {
 	runFanoutBudget: RunFanoutBudgetDescriptor;
 	topLevelAsyncCapacityEligible: boolean;
 	activeAsyncCapacity?: ActiveAsyncCapacityHandle;
+}
+
+function resolveLaunchModelRouting(input: {
+	agentConfig: AgentConfig;
+	explicitModel?: string;
+	explicitModelClass?: string;
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
+	parentModel?: ParentModel;
+	availableModels: ModelInfo[];
+	currentProvider?: string;
+	modelScope?: ModelScopeConfig;
+}): ModelRoutingResolution {
+	return resolveModelRouting({
+		explicitModel: input.explicitModel,
+		explicitModelClass: input.explicitModelClass,
+		agentModel: input.agentConfig.model,
+		agentFallbackModels: input.agentConfig.fallbackModels,
+		agentModelClass: input.agentConfig.modelClass,
+		agentModelClassSource: input.agentConfig.modelClassSource === "agent-override" ? "agent-override" : "agent-frontmatter",
+		modelPools: input.modelPools,
+		modelPoolSources: input.modelPoolSources,
+		parentModel: input.parentModel,
+		availableModels: input.availableModels,
+		preferredProvider: input.currentProvider,
+		modelScope: input.modelScope,
+	});
 }
 
 function resolveRequestedCwd(runtimeCwd: string, requestedCwd: string | undefined): string {
@@ -1170,6 +1203,7 @@ function appendStepToAsyncChain(input: {
 		agents,
 		ctx: asyncCtx,
 		availableModels: input.ctx.modelRegistry.getAvailable().map(toModelInfo),
+		modelPools: discoveredForAppend.modelPools,
 		cwd: status.cwd ?? input.requestCwd,
 		chainSkills,
 		dynamicFanoutMaxItems: input.deps.config.chain?.dynamicFanout?.maxItems,
@@ -1434,9 +1468,9 @@ async function resumeAsyncRun(input: {
 			details: { mode: "management", results: [] },
 		};
 	}
-	if (input.params.model !== undefined) {
+	if (input.params.model !== undefined || input.params.modelClass !== undefined) {
 		return {
-			content: [{ type: "text", text: "action='resume' reuses the persisted child model and does not accept a model override." }],
+			content: [{ type: "text", text: "action='resume' reuses the persisted child model routing contract and does not accept model or modelClass overrides." }],
 			isError: true,
 			details: { mode: "management", results: [] },
 		};
@@ -1613,6 +1647,7 @@ async function resumeAsyncRun(input: {
 		permissions: input.deps.config.permissions,
 			}),
 			availableModels,
+			modelPools: discovered.modelPools,
 			cwd: effectiveCwd,
 			maxOutput: input.params.maxOutput,
 			artifactsDir: getArtifactsDir(parentSessionFile, effectiveCwd, artifactConfig.dir),
@@ -1721,7 +1756,9 @@ async function resumeAsyncRun(input: {
 			sourceRunId: target.runId,
 			...(input.deps.state.currentSessionId ? { parentSessionId: input.deps.state.currentSessionId } : {}),
 		},
-		modelOverride: recoveryDescriptor?.model ?? target.model,
+		modelOverride: target.model ?? recoveryDescriptor?.model,
+		modelCandidates: resolveRecoveryModelCandidates(target.model, recoveryDescriptor),
+		modelRouting: recoveryDescriptor?.modelRouting,
 		thinkingOverride: recoveryDescriptor?.thinking ?? target.thinking,
 		outputBaseDir: resolveSingleRunOutputBaseDir(input.deps, artifactsDir, runId),
 		maxSubagentDepth: recoveryDescriptor?.maxSubagentDepth ?? resolveCurrentMaxSubagentDepth(input.deps.config.maxSubagentDepth),
@@ -2032,6 +2069,41 @@ function validateExecutionInput(
 	hasSingle: boolean,
 	allowClarifyTaskPrompt: boolean,
 ): AgentToolResult<Details> | null {
+	const routingError = (message: string): AgentToolResult<Details> => ({
+		content: [{ type: "text", text: message }],
+		isError: true,
+		details: { mode: getRequestedModeLabel(params), results: [] },
+	});
+	const validateRouting = (agentName: string, model: string | undefined, modelClass: string | undefined, label: string): AgentToolResult<Details> | null => {
+		if (model !== undefined && modelClass !== undefined) return routingError(`${label} cannot set both 'model' and 'modelClass'.`);
+		const agent = agents.find((candidate) => candidate.name === agentName);
+		if (agent?.runner?.type === "external-cli" && (modelClass !== undefined || agent.modelClass !== undefined)) {
+			return routingError(`${label} uses runner.type='external-cli' and does not support modelClass routing.`);
+		}
+		return null;
+	};
+	if (hasSingle && params.agent) {
+		const error = validateRouting(params.agent, params.model, params.modelClass, `Agent '${params.agent}'`);
+		if (error) return error;
+	}
+	if (hasTasks && params.tasks) {
+		for (let index = 0; index < params.tasks.length; index++) {
+			const task = params.tasks[index]!;
+			const error = validateRouting(task.agent, task.model, task.modelClass, `Task ${index + 1} (${task.agent})`);
+			if (error) return error;
+		}
+	}
+	if (hasChain && params.chain) {
+		for (let stepIndex = 0; stepIndex < params.chain.length; stepIndex++) {
+			const step = params.chain[stepIndex]!;
+			const entries = isParallelStep(step) ? step.parallel : isDynamicParallelStep(step) ? [step.parallel] : isCheckpointStep(step) ? [] : [step as SequentialStep];
+			for (let taskIndex = 0; taskIndex < entries.length; taskIndex++) {
+				const entry = entries[taskIndex]!;
+				const error = validateRouting(entry.agent, entry.model, entry.modelClass, `Chain step ${stepIndex + 1}${entries.length > 1 ? ` task ${taskIndex + 1}` : ""} (${entry.agent})`);
+				if (error) return error;
+			}
+		}
+	}
 	if (Number(hasChain) + Number(hasTasks) + Number(hasSingle) !== 1) {
 		return {
 			content: [
@@ -2503,25 +2575,29 @@ function resolveStaticLaunchSummary(input: {
 	agent: string;
 	index: number;
 	explicitModel?: string;
+	explicitModelClass?: string;
 	agents: AgentConfig[];
 	parentModel?: ParentModel;
 	availableModels: ModelInfo[];
 	currentProvider?: string;
 	modelScope?: ModelScopeConfig;
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
 	thinkingOverrideForTask: ForkThinkingOverrideForTask;
 }): StaticLaunchSummary {
 	const agentConfig = input.agents.find((agent) => agent.name === input.agent);
 	const externalRunner = agentConfig?.runner?.type === "external-cli";
-	const model = externalRunner
-		? undefined
-		: resolveEffectiveSubagentModel(
-			input.explicitModel,
-			agentConfig?.model,
-			input.parentModel,
-			input.availableModels,
-			input.currentProvider,
-			input.modelScope === undefined ? {} : { scope: input.modelScope },
-		);
+	const model = externalRunner || !agentConfig ? undefined : resolveLaunchModelRouting({
+		agentConfig,
+		explicitModel: input.explicitModel,
+		explicitModelClass: input.explicitModelClass,
+		modelPools: input.modelPools,
+		modelPoolSources: input.modelPoolSources,
+		parentModel: input.parentModel,
+		availableModels: input.availableModels,
+		currentProvider: input.currentProvider,
+		modelScope: input.modelScope,
+	}).primaryModel;
 	const thinkingOverride = externalRunner ? undefined : input.thinkingOverrideForTask(input.agent, input.index, model);
 	const thinking = externalRunner ? undefined : resolveEffectiveThinking(model, thinkingOverride ?? agentConfig?.thinking);
 	return {
@@ -2538,28 +2614,33 @@ function collectStaticLaunchSummaries(input: {
 	availableModels: ModelInfo[];
 	currentProvider?: string;
 	modelScope?: ModelScopeConfig;
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
 	thinkingOverrideForTask: ForkThinkingOverrideForTask;
 	dynamicFanoutMaxItems?: number;
 }): StaticLaunchSummary[] {
-	const summary = (agent: string, index: number, explicitModel?: string) => resolveStaticLaunchSummary({
+	const summary = (agent: string, index: number, explicitModel?: string, explicitModelClass?: string) => resolveStaticLaunchSummary({
 		agent,
 		index,
 		explicitModel,
+		explicitModelClass,
 		agents: input.agents,
 		parentModel: input.parentModel,
 		availableModels: input.availableModels,
 		currentProvider: input.currentProvider,
 		modelScope: input.modelScope,
+		modelPools: input.modelPools,
+		modelPoolSources: input.modelPoolSources,
 		thinkingOverrideForTask: input.thinkingOverrideForTask,
 	});
-	if (input.params.tasks) return input.params.tasks.map((task, index) => summary(task.agent, index, task.model));
+	if (input.params.tasks) return input.params.tasks.map((task, index) => summary(task.agent, index, task.model, task.modelClass));
 	if (input.params.chain?.length) {
 		const launches: StaticLaunchSummary[] = [];
 		let flatIndex = 0;
 		for (const step of input.params.chain) {
 			if (isParallelStep(step)) {
 				for (const task of step.parallel) {
-					launches.push(summary(task.agent, flatIndex, task.model));
+					launches.push(summary(task.agent, flatIndex, task.model, task.modelClass));
 					flatIndex++;
 				}
 				continue;
@@ -2567,18 +2648,18 @@ function collectStaticLaunchSummaries(input: {
 			if (isDynamicParallelStep(step)) {
 				const maxItems = step.expand.maxItems ?? input.dynamicFanoutMaxItems ?? 0;
 				for (let itemIndex = 0; itemIndex < maxItems; itemIndex++) {
-					launches.push(summary(step.parallel.agent, flatIndex, step.parallel.model));
+					launches.push(summary(step.parallel.agent, flatIndex, step.parallel.model, step.parallel.modelClass));
 					flatIndex++;
 				}
 				continue;
 			}
 			const sequential = step as SequentialStep;
-			launches.push(summary(sequential.agent, flatIndex, sequential.model));
+			launches.push(summary(sequential.agent, flatIndex, sequential.model, sequential.modelClass));
 			flatIndex++;
 		}
 		return launches;
 	}
-	return input.params.agent ? [summary(input.params.agent, 0, input.params.model as string | undefined)] : [];
+	return input.params.agent ? [summary(input.params.agent, 0, input.params.model as string | undefined, input.params.modelClass)] : [];
 }
 
 function firstChainAgent(chain: ChainStep[]): string | undefined {
@@ -2759,6 +2840,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			task: shouldForkAgent(contextPolicy, task.agent) ? wrapForkTask(task.task) : task.task,
 			cwd: task.cwd,
 			...(task.model !== undefined ? { model: task.model } : {}),
+			...(task.modelClass !== undefined ? { modelClass: task.modelClass } : {}),
 			...(skillOverrides[index] !== undefined ? { skill: skillOverrides[index] } : {}),
 			...(task.output !== undefined && task.output !== true ? { output: task.output } : {}),
 			...(task.outputMode !== undefined ? { outputMode: task.outputMode } : {}),
@@ -2780,6 +2862,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			agents,
 			ctx: asyncCtx,
 			availableModels,
+			modelPools: data.modelPools,
+			modelPoolSources: data.modelPoolSources,
 			cwd: effectiveCwd,
 			maxOutput: params.maxOutput,
 			artifactsDir: artifactConfig.enabled ? artifactsDir : undefined,
@@ -2828,6 +2912,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			agents,
 			ctx: asyncCtx,
 			availableModels,
+			modelPools: data.modelPools,
+			modelPoolSources: data.modelPoolSources,
 			cwd: effectiveCwd,
 			maxOutput: params.maxOutput,
 			artifactsDir: artifactConfig.enabled ? artifactsDir : undefined,
@@ -2883,9 +2969,22 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 		const externalRunnerWithoutExplicitModel = a.runner?.type === "external-cli"
 			&& params.model === undefined
 			&& (a.model === undefined || (a.modelSource?.type === "subagents.defaultModel" && a.model === a.modelSource.model));
+		const modelRouting = a.runner?.type === "external-cli"
+			? undefined
+			: resolveLaunchModelRouting({
+				agentConfig: a,
+				explicitModel: params.model,
+				explicitModelClass: params.modelClass,
+				modelPools: data.modelPools,
+				modelPoolSources: data.modelPoolSources,
+				parentModel,
+				availableModels,
+				currentProvider,
+				modelScope: data.modelScope,
+			});
 		const modelOverride = a.runner?.type === "external-cli"
 			? params.model ?? (externalRunnerWithoutExplicitModel ? undefined : a.model)
-			: resolveEffectiveSubagentModel(params.model as string | undefined, a.model, parentModel, availableModels, currentProvider, data.modelScope === undefined ? {} : { scope: data.modelScope });
+			: modelRouting?.primaryModel;
 		return executeAsyncSingle(id, compactOptional<Parameters<typeof executeAsyncSingle>[1]>({
 			agent: params.agent!,
 			task: shouldForkAgent(contextPolicy, params.agent!) ? wrapForkTask(params.task ?? "") : (params.task ?? ""),
@@ -2909,6 +3008,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			...(params.reads !== undefined ? { reads: params.reads } : {}),
 			outputBaseDir: resolveSingleRunOutputBaseDir(deps, artifactsDir, id),
 			modelOverride,
+			modelCandidates: modelRouting?.modelCandidates,
+			modelRouting: modelRouting ? toModelRoutingSnapshot(modelRouting) : undefined,
 			thinkingOverride: externalRunnerWithoutExplicitModel ? undefined : thinkingOverrideForTask(params.agent!, 0, modelOverride),
 			maxSubagentDepth,
 			waitToolEnabled: deps.waitToolEnabled,
@@ -2974,6 +3075,8 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		agents,
 		ctx: chainCtx,
 		modelScope: data.modelScope,
+		modelPools: data.modelPools,
+		modelPoolSources: data.modelPoolSources,
 		intercomEvents: deps.pi.events,
 		signal,
 		runId,
@@ -3061,6 +3164,8 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 				agents,
 				ctx: asyncCtx,
 				availableModels: ctx.modelRegistry.getAvailable().map(toModelInfo),
+				modelPools: data.modelPools,
+				modelPoolSources: data.modelPoolSources,
 				cwd: effectiveCwd,
 				maxOutput: params.maxOutput,
 				artifactsDir: artifactConfig.enabled ? artifactsDir : undefined,
@@ -3161,6 +3266,8 @@ interface ForegroundParallelRunInput {
 	modelScope?: ModelScopeConfig;
 	parentModel?: ParentModel;
 	modelOverrides: (string | undefined)[];
+	modelCandidatesByTask: string[][];
+	modelRoutingByTask: Array<ReturnType<typeof toModelRoutingSnapshot>>;
 	behaviors: Array<ReturnType<typeof resolveStepBehavior>>;
 	firstProgressIndex: number;
 	controlConfig: ResolvedControlConfig;
@@ -3627,6 +3734,8 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			orchestratorIntercomTarget: input.orchestratorIntercomTarget,
 			nestedRoute: input.foregroundControl?.nestedRoute,
 			modelOverride: input.modelOverrides[index],
+			modelCandidates: input.modelCandidatesByTask[index],
+			modelRouting: input.modelRoutingByTask[index],
 			thinkingOverride: input.thinkingOverrideForTask(task.agent, index, input.modelOverrides[index]),
 			availableModels: input.availableModels,
 			preferredModelProvider: input.parentModel?.provider,
@@ -3765,12 +3874,24 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		...(task.progress !== undefined ? { progress: task.progress } : {}),
 		...(skillOverrides[index] !== undefined ? { skills: skillOverrides[index] } : {}),
 		...(task.model !== undefined ? { model: task.model } : {}),
+		...(task.modelClass !== undefined ? { modelClass: task.modelClass } : {}),
 	}));
-	const modelOverrides: (string | undefined)[] = tasks.map((_, i) =>
+	const modelRoutings: Array<ModelRoutingResolution | undefined> = tasks.map((_, i) =>
 		agentConfigs[i]?.runner?.type === "external-cli"
 			? undefined
-			: resolveEffectiveSubagentModel(behaviorOverrides[i]?.model, agentConfigs[i]?.model, parentModel, availableModels, currentProvider, data.modelScope === undefined ? {} : { scope: data.modelScope }),
+			: resolveLaunchModelRouting({
+				agentConfig: agentConfigs[i]!,
+				explicitModel: behaviorOverrides[i]?.model,
+				explicitModelClass: behaviorOverrides[i]?.modelClass,
+				modelPools: data.modelPools,
+				modelPoolSources: data.modelPoolSources,
+				parentModel,
+				availableModels,
+				currentProvider,
+				modelScope: data.modelScope,
+			}),
 	);
+	const modelOverrides: (string | undefined)[] = modelRoutings.map((routing) => routing?.primaryModel);
 
 	if (params.clarify === true && ctx.hasUI) {
 		const behaviors = agentConfigs.map((c, i) =>
@@ -3803,11 +3924,23 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		taskTexts = result.templates;
 		for (let i = 0; i < result.behaviorOverrides.length; i++) {
 			const override = result.behaviorOverrides[i];
-			if (override?.model !== undefined) {
-				modelOverrides[i] = agentConfigs[i]?.runner?.type === "external-cli"
+			if (override?.model !== undefined || override?.modelClass !== undefined) {
+				modelRoutings[i] = agentConfigs[i]?.runner?.type === "external-cli"
 					? undefined
-					: resolveEffectiveSubagentModel(override.model, agentConfigs[i]?.model, parentModel, availableModels, currentProvider, data.modelScope === undefined ? {} : { scope: data.modelScope });
-				behaviorOverrides[i]!.model = override.model;
+					: resolveLaunchModelRouting({
+						agentConfig: agentConfigs[i]!,
+						explicitModel: override.model,
+						explicitModelClass: override.modelClass,
+						modelPools: data.modelPools,
+						modelPoolSources: data.modelPoolSources,
+						parentModel,
+						availableModels,
+						currentProvider,
+						modelScope: data.modelScope,
+					});
+				modelOverrides[i] = modelRoutings[i]?.primaryModel;
+				if (override.model !== undefined) behaviorOverrides[i]!.model = override.model;
+				if (override.modelClass !== undefined) behaviorOverrides[i]!.modelClass = override.modelClass;
 			}
 			if (override?.output !== undefined) behaviorOverrides[i]!.output = override.output;
 			if (override?.reads !== undefined) behaviorOverrides[i]!.reads = override.reads;
@@ -3848,6 +3981,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 					task: taskText,
 					cwd: t.cwd,
 					...(behaviorOverrides[i]?.model !== undefined ? { model: behaviorOverrides[i]!.model } : {}),
+					...(behaviorOverrides[i]?.modelClass !== undefined ? { modelClass: behaviorOverrides[i]!.modelClass } : {}),
 					...(skillOverrides[i] !== undefined ? { skill: skillOverrides[i] } : {}),
 					...(behaviorOverrides[i]?.output !== undefined ? { output: behaviorOverrides[i]!.output } : {}),
 					...(behaviorOverrides[i]?.outputMode !== undefined ? { outputMode: behaviorOverrides[i]!.outputMode } : {}),
@@ -3867,6 +4001,8 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 					agents,
 					ctx: asyncCtx,
 					availableModels,
+					modelPools: data.modelPools,
+					modelPoolSources: data.modelPoolSources,
 					cwd: effectiveCwd,
 					maxOutput: params.maxOutput,
 					artifactsDir: artifactConfig.enabled ? artifactsDir : undefined,
@@ -3997,6 +4133,8 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			modelScope: data.modelScope,
 			parentModel,
 			modelOverrides,
+			modelCandidatesByTask: modelRoutings.map((routing) => routing?.modelCandidates ?? []),
+			modelRoutingByTask: modelRoutings.map((routing) => routing ? toModelRoutingSnapshot(routing) : undefined),
 			behaviors,
 			firstProgressIndex: parallelProgressPrecreated ? -1 : firstProgressIndex,
 			controlConfig,
@@ -4159,14 +4297,18 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 	const currentProvider = parentModel?.provider;
 	const availableModels: ModelInfo[] = ctx.modelRegistry.getAvailable().map(toModelInfo);
 	let task = params.task ?? "";
-	let modelOverride: string | undefined = resolveEffectiveSubagentModel(
-		params.model as string | undefined,
-		agentConfig.model,
+	let modelRouting = resolveLaunchModelRouting({
+		agentConfig,
+		explicitModel: params.model,
+		explicitModelClass: params.modelClass,
+		modelPools: data.modelPools,
+		modelPoolSources: data.modelPoolSources,
 		parentModel,
 		availableModels,
 		currentProvider,
-		data.modelScope === undefined ? {} : { scope: data.modelScope },
-	);
+		modelScope: data.modelScope,
+	});
+	let modelOverride = modelRouting.primaryModel;
 	let skillOverride: string[] | false | undefined = normalizeSkillInput(params.skill);
 	let readsOverride: string[] | false | undefined = params.reads;
 	const rawOutput = params.output !== undefined ? params.output : agentConfig.output;
@@ -4203,7 +4345,20 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 
 		task = result.templates[0]!;
 		const override = result.behaviorOverrides[0];
-		if (override?.model !== undefined) modelOverride = resolveEffectiveSubagentModel(override.model, agentConfig.model, parentModel, availableModels, currentProvider, data.modelScope === undefined ? {} : { scope: data.modelScope });
+		if (override?.model !== undefined || override?.modelClass !== undefined) {
+			modelRouting = resolveLaunchModelRouting({
+				agentConfig,
+				explicitModel: override.model,
+				explicitModelClass: override.modelClass,
+				modelPools: data.modelPools,
+				modelPoolSources: data.modelPoolSources,
+				parentModel,
+				availableModels,
+				currentProvider,
+				modelScope: data.modelScope,
+			});
+			modelOverride = modelRouting.primaryModel;
+		}
 		if (override?.output !== undefined) effectiveOutput = normalizeSingleOutputOverride(override.output, agentConfig.output);
 		if (override?.skills !== undefined) skillOverride = override.skills;
 		if (override?.reads !== undefined) readsOverride = override.reads;
@@ -4254,6 +4409,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 					...(readsOverride !== undefined ? { reads: readsOverride } : {}),
 					outputBaseDir: resolveSingleRunOutputBaseDir(deps, artifactsDir, id),
 					modelOverride,
+					modelCandidates: modelRouting.modelCandidates,
+					modelRouting: toModelRoutingSnapshot(modelRouting),
 					thinkingOverride: thinkingOverrideForTask(params.agent!, 0, modelOverride),
 					maxSubagentDepth,
 					waitToolEnabled: deps.waitToolEnabled,
@@ -4376,6 +4533,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 			nestedRoute: foregroundControl?.nestedRoute,
 			index: 0,
 			modelOverride,
+			modelCandidates: modelRouting.modelCandidates,
+			modelRouting: toModelRoutingSnapshot(modelRouting),
 			thinkingOverride: thinkingOverrideForTask(params.agent!, 0, modelOverride),
 			availableModels,
 			preferredModelProvider: currentProvider,
@@ -4706,6 +4865,7 @@ function prepareWorkflowChildParams(params: SubagentParamsLike): SubagentParamsL
 		agent,
 		task = "",
 		model,
+		modelClass,
 		skill,
 		output,
 		outputMode,
@@ -4723,6 +4883,7 @@ function prepareWorkflowChildParams(params: SubagentParamsLike): SubagentParamsL
 			agent,
 			task,
 			...(model !== undefined ? { model } : {}),
+			...(modelClass !== undefined ? { modelClass } : {}),
 			...(skill !== undefined ? { skill } : {}),
 			...(output !== undefined ? { output } : {}),
 			...(reads !== undefined ? { reads } : {}),
@@ -6037,6 +6198,8 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		if (canonicalParams.error) return buildRequestedModeError(effectiveParams, canonicalParams.error);
 		effectiveParams = canonicalParams.params!;
 		const modelScope = discovered.modelScope;
+		const modelPools = discovered.modelPools;
+		const modelPoolSources = discovered.modelPoolSources;
 		effectiveParams = applySingleAgentLaunchDefaults(effectiveParams, discoveredAgents);
 		const turnBudget = resolveTurnBudgetConfig(effectiveParams.turnBudget ?? deps.config.turnBudget);
 		if (turnBudget.error) return buildRequestedModeError(effectiveParams, turnBudget.error);
@@ -6337,6 +6500,8 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			configToolTimeoutMs: deps.config.toolTimeoutMs,
 			contextPolicy,
 			modelScope,
+			modelPools,
+			modelPoolSources,
 			parentModel: requestParentModel,
 			parentSessionId: requestSessionId,
 			parentPiSessionId: requestPiSessionId,
@@ -6441,6 +6606,8 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 					availableModels: ctx.modelRegistry.getAvailable().map(toModelInfo),
 					currentProvider: requestParentModel?.provider,
 					modelScope,
+					modelPools,
+					modelPoolSources,
 					thinkingOverrideForTask: forkThinkingOverrideForTask,
 					dynamicFanoutMaxItems: deps.config.chain?.dynamicFanout?.maxItems,
 				});

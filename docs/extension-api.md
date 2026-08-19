@@ -190,7 +190,7 @@ Results:
 Bounds:
 
 - Schemas are capped at 64 KiB; tasks and returned text/structured values are capped at 1 MiB, with smaller bounds on identity/configuration strings and a maximum `timeoutMs` of 2,147,483,647.
-- Structured delegation accepts `toolBudget: { hard: 0, block: "*" }` to block the first tool call and run a zero-tool leaf; ordinary model-facing/configured budgets keep their existing minimum of one.
+- Structured delegation accepts `modelClass` as an alternative to `model`, and accepts `toolBudget: { hard: 0, block: "*" }` to block the first tool call and run a zero-tool leaf; ordinary model-facing/configured budgets keep their existing minimum of one.
 - The foreground bridge retains up to 8,192 exact pending-cancellation and settled-attempt identities per extension context. If either history fills, it fails closed with `unavailable_context` for later starts rather than evicting identity facts; lifecycle reset clears the bounded history.
 
 Constraints:

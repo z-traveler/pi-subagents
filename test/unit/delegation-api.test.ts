@@ -110,6 +110,16 @@ describe("public subagent delegation contract", () => {
 		}
 	});
 
+	it("accepts modelClass as an alternative to a concrete model", () => {
+		const { model: _model, ...withoutModel } = request;
+		const parsed = parseSubagentDelegationRequest({ ...withoutModel, modelClass: "smart" });
+		assert.equal(parsed.ok, true);
+		if (parsed.ok) assert.equal(parsed.request.modelClass, "smart");
+		const conflict = parseSubagentDelegationRequest({ ...request, modelClass: "smart" });
+		assert.equal(conflict.ok, false);
+		if (!conflict.ok) assert.match(conflict.error, /both model and modelClass/);
+	});
+
 	it("rejects non-JSON schemas without executing toJSON hooks", () => {
 		let calls = 0;
 		const parsed = parseSubagentDelegationRequest({

@@ -51,7 +51,7 @@ function writeRetainedRun(root: string, index: number, options: WriteRunOptions 
 	}), "utf-8");
 	if (options.recoveryDescriptor === "invalid") {
 		fs.writeFileSync(path.join(asyncDir, "recovery-descriptor.json"), JSON.stringify({
-			version: 2,
+			version: 3,
 			sourceRunId: runId,
 			agent: "worker",
 			cwd: root,
@@ -144,7 +144,7 @@ describe("retained child roster", () => {
 			assert.deepEqual(children.map((child) => [child.runId, child.resumability]), [
 				["child-8", { state: "not-resumable", reason: "recovery descriptor belongs to agent reviewer" }],
 				["child-7", { state: "not-resumable", reason: "recovery descriptor belongs to run other-run" }],
-				["child-6", { state: "not-resumable", reason: `invalid recovery descriptor: Invalid async recovery descriptor '${path.join(root, "runs", "child-6", "recovery-descriptor.json")}': version must be 1.` }],
+				["child-6", { state: "not-resumable", reason: `invalid recovery descriptor: Invalid async recovery descriptor '${path.join(root, "runs", "child-6", "recovery-descriptor.json")}': version must be 1 or 2.` }],
 				["child-5", { state: "not-resumable", reason: "missing recovery descriptor" }],
 				["child-4", { state: "not-resumable", reason: "external CLI runner" }],
 				["child-3", { state: "not-resumable", reason: "stopped run" }],

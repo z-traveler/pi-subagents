@@ -13,7 +13,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../../agents/agents.ts";
 import { appendAgentRefinementOverlay } from "../../agents/agent-refinements.ts";
 import { writePrivateAtomicJson } from "../../shared/atomic-json.ts";
-import { applyThinkingSuffix, projectLaunchResolvedChildExtensions, resolvePiLaunchToolPlan } from "../shared/pi-args.ts";
+import { applyThinkingSuffix, applyThinkingToModelCandidates, projectLaunchResolvedChildExtensions, resolvePiLaunchToolPlan } from "../shared/pi-args.ts";
 import { injectOutputPathSystemPrompt, injectSingleOutputInstruction, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { buildChainInstructions, isCheckpointStep, isDynamicParallelStep, isParallelStep, resolveChainPath, resolveExistingReadPaths, resolveStepBehavior, suppressProgressForReadOnlyTask, writeInitialProgressFile, type ChainStep, type ResolvedStepBehavior, type SequentialStep, type StepOverrides } from "../../shared/settings.ts";
 import type { RunnerStep } from "../shared/parallel-utils.ts";
@@ -23,7 +23,8 @@ import { resolveNodeExecutable } from "../../shared/node-executable.ts";
 import { buildSkillInjection, normalizeSkillInput, resolveSkillsWithFallback } from "../../agents/skills.ts";
 import { buildAgentMemoryInjection } from "../../agents/agent-memory.ts";
 import { PI_CODING_AGENT_PACKAGE_ROOT_ENV, PROMPT_REDACTED, resolveChildCwd } from "../../shared/utils.ts";
-import { buildModelCandidates, resolveEffectiveSubagentModel, resolveModelCandidate, resolveSubagentModelOverride, type AvailableModelInfo, type ParentModel } from "../shared/model-fallback.ts";
+import { buildModelCandidates, resolveEffectiveSubagentModel, resolveModelCandidate, resolveModelRouting, resolveSubagentModelOverride, toModelRoutingSnapshot, type AvailableModelInfo, type ParentModel } from "../shared/model-fallback.ts";
+import type { ModelPools, ModelPoolSources } from "../../shared/model-routing.ts";
 import { resolveToolTimeoutMs, toolTimeoutFromEnv } from "../shared/tool-timeout.ts";
 import type { ModelScopeConfig } from "../shared/model-scope.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
@@ -40,6 +41,7 @@ import {
 	type ArtifactConfig,
 	type Details,
 	type IntercomBridgeConfig,
+	type ModelRoutingSnapshot,
 	type JsonSchemaObject,
 	type MaxOutputConfig,
 	type NestedRouteInfo,
@@ -148,6 +150,8 @@ interface AsyncChainParams {
 	agents: AgentConfig[];
 	ctx: AsyncExecutionContext;
 	availableModels?: AvailableModelInfo[];
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
 	cwd?: string;
 	maxOutput?: MaxOutputConfig;
 	artifactsDir?: string;
@@ -218,6 +222,9 @@ interface AsyncSingleParams {
 	agentContract?: AgentContract;
 	structuredOutputSchema?: JsonSchemaObject;
 	modelOverride?: string;
+	/** Frozen ordered candidates resolved by model-class routing for this launch. */
+	modelCandidates?: string[];
+	modelRouting?: ModelRoutingSnapshot;
 	thinkingOverride?: AgentConfig["thinking"];
 	availableModels?: AvailableModelInfo[];
 	maxSubagentDepth: number;
@@ -265,6 +272,8 @@ export interface AsyncRunnerStepBuildParams {
 	agents: AgentConfig[];
 	ctx: AsyncExecutionContext;
 	availableModels?: AvailableModelInfo[];
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
 	cwd?: string;
 	chainSkills?: string[];
 	sessionFilesByFlatIndex?: (string | undefined)[];
@@ -712,6 +721,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			...(s.progress !== undefined ? { progress: s.progress } : {}),
 			...(stepSkillInput !== undefined ? { skills: stepSkillInput } : {}),
 			...(s.model !== undefined ? { model: s.model } : {}),
+			...(s.modelClass !== undefined ? { modelClass: s.modelClass } : {}),
 		};
 	};
 	const buildSeqStep = (s: SequentialStep, sessionFile?: string, behaviorCwd?: string, progressPrecreated = false, resolvedBehavior?: ResolvedStepBehavior, flatIndex?: number, parallelOutputNamespace?: { stepIndex: number; taskIndex?: number }, runFanoutPath?: string) => {
@@ -720,6 +730,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 		if (externalRunner) {
 			const unsupported: string[] = [];
 			if (s.model !== undefined) unsupported.push("model override");
+			if (s.modelClass !== undefined || a.modelClass !== undefined) unsupported.push("modelClass routing");
 			if (s.outputSchema !== undefined) unsupported.push("structured output");
 			if (s.acceptance !== undefined || params.agentContract !== undefined || s.agentContract !== undefined) unsupported.push("acceptance/agent contract");
 			if (s.toolBudget !== undefined || params.toolBudget !== undefined || a.toolBudget !== undefined || params.configToolBudget !== undefined) unsupported.push("tool budget");
@@ -788,17 +799,30 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 		const taskText = `${readInstructions.prefix}${taskTemplate}${progressInstructions.suffix}`;
 		const task = namespaceOutputPath ? taskText : injectSingleOutputInstruction(taskText, outputPath, a);
 
-		const primaryModel = externalRunner ? undefined : resolveEffectiveSubagentModel(
-			s.model,
-			a.model,
-			ctx.currentModel,
+		const routing = externalRunner ? undefined : resolveModelRouting({
+			explicitModel: s.model,
+			explicitModelClass: s.modelClass,
+			agentModel: a.model,
+			agentFallbackModels: a.fallbackModels,
+			agentModelClass: a.modelClass,
+			agentModelClassSource: a.modelClassSource === "agent-override" ? "agent-override" : "agent-frontmatter",
+			modelPools: params.modelPools,
+			modelPoolSources: params.modelPoolSources,
+			parentModel: ctx.currentModel,
 			availableModels,
-			ctx.currentModelProvider,
-			{ scope: ctx.modelScope },
-		);
+			preferredProvider: ctx.currentModelProvider,
+			modelScope: ctx.modelScope,
+		});
+		const primaryModel = routing?.primaryModel;
 		const thinkingOverride = flatIndex === undefined ? undefined : thinkingOverridesByFlatIndex?.[flatIndex];
 		const effectiveThinking = externalRunner ? undefined : thinkingOverride ?? a.thinking;
 		const model = externalRunner ? undefined : applyThinkingSuffix(primaryModel, effectiveThinking, thinkingOverride !== undefined);
+		const modelCandidates = externalRunner ? undefined : applyThinkingToModelCandidates(
+			routing?.modelCandidates ?? buildModelCandidates(primaryModel, a.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope }),
+			effectiveThinking,
+			thinkingOverride !== undefined,
+			routing?.requestedModelClass,
+		);
 		const agentContract = s.agentContract ?? params.agentContract;
 		const toolPlan = resolvePiLaunchToolPlan({
 			tools: a.tools,
@@ -835,9 +859,8 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			model,
 			thinking: resolveEffectiveThinking(model, effectiveThinking),
 			launchResolvedExtensions,
-			modelCandidates: externalRunner ? undefined : buildModelCandidates(primaryModel, a.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope }).map((candidate) =>
-				applyThinkingSuffix(candidate, effectiveThinking, thinkingOverride !== undefined),
-			),
+			modelCandidates,
+			...(routing && modelCandidates && toModelRoutingSnapshot(routing, modelCandidates) ? { modelRouting: toModelRoutingSnapshot(routing, modelCandidates) } : {}),
 			tools: a.tools,
 			extensions: a.extensions,
 			subagentOnlyExtensions: a.subagentOnlyExtensions,
@@ -1063,6 +1086,8 @@ export function executeAsyncChain(
 		agents,
 		ctx,
 		availableModels: params.availableModels,
+		modelPools: params.modelPools,
+		modelPoolSources: params.modelPoolSources,
 		cwd,
 		chainSkills: params.chainSkills,
 		sessionFilesByFlatIndex,
@@ -1431,11 +1456,15 @@ export function executeAsyncSingle(
 		: undefined;
 	const modelCandidates = externalRunner
 		? []
-		: buildModelCandidates(primaryModel, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope })
-			.flatMap((candidate) => {
-				const resolved = applyThinkingSuffix(candidate, effectiveThinking, params.thinkingOverride !== undefined);
-				return resolved ? [resolved] : [];
-			});
+		: applyThinkingToModelCandidates(
+			params.modelCandidates ?? buildModelCandidates(primaryModel, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope }),
+			effectiveThinking,
+			params.thinkingOverride !== undefined,
+			params.modelRouting?.modelClass,
+		);
+	const modelRouting = params.modelRouting
+		? { ...params.modelRouting, candidates: [...modelCandidates] }
+		: undefined;
 	const effectiveSystemPrompt = appendTurnBudgetSystemPrompt(systemPrompt, params.turnBudget);
 	const toolPlan = resolvePiLaunchToolPlan({
 		tools: agentConfig.tools,
@@ -1455,6 +1484,8 @@ export function executeAsyncSingle(
 		task,
 		...(model ? { model } : {}),
 		modelCandidates,
+		...(modelRouting?.modelClass ? { modelClass: modelRouting.modelClass } : {}),
+		...(modelRouting?.poolDigest ? { modelPoolDigest: modelRouting.poolDigest } : {}),
 		...(resolveEffectiveThinking(model, effectiveThinking) ? { thinking: resolveEffectiveThinking(model, effectiveThinking) } : {}),
 		systemPrompt: effectiveSystemPrompt,
 		systemPromptMode: agentConfig.systemPromptMode,
@@ -1479,7 +1510,7 @@ export function executeAsyncSingle(
 	});
 	const recoveryAgentConfig = params.recoveryAgentConfig ?? agentConfig;
 	const recoveryDescriptor: SteeringRecoveryDescriptor = {
-		version: 1,
+		version: 2,
 		launchContractDigest,
 		runFanoutBudget,
 		sourceRunId: id,
@@ -1489,7 +1520,8 @@ export function executeAsyncSingle(
 		...(sessionFile ? { sessionFile } : {}),
 		cwd: runnerCwd,
 		...(model ? { model } : {}),
-		...(recoveryAgentConfig.fallbackModels ? { fallbackModels: [...recoveryAgentConfig.fallbackModels] } : {}),
+		...(modelRouting ? { modelRouting } : {}),
+		...(modelCandidates.length > 1 ? { fallbackModels: modelCandidates.slice(1) } : {}),
 		...(effectiveThinking ? { thinking: resolveEffectiveThinking(model, effectiveThinking) } : {}),
 		...(recoveryAgentConfig.tools ? { tools: [...recoveryAgentConfig.tools] } : {}),
 		...(recoveryAgentConfig.extensions ? { extensions: [...recoveryAgentConfig.extensions] } : {}),
@@ -1546,6 +1578,7 @@ export function executeAsyncSingle(
 						model,
 						thinking: resolveEffectiveThinking(model, effectiveThinking),
 						modelCandidates,
+						...(modelRouting ? { modelRouting } : {}),
 						tools: agentConfig.tools,
 						extensions: agentConfig.extensions,
 						subagentOnlyExtensions: agentConfig.subagentOnlyExtensions,

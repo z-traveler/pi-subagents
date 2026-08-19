@@ -86,7 +86,7 @@ You can override selected builtin fields without copying the whole agent. Overri
 }
 ```
 
-Supported override fields: `description`, `model`, `fallbackModels`, `thinking`, `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, `defaultContext`, `acceptanceRole`, `disabled`, `skills`, `tools`, and `systemPrompt`.
+Supported override fields: `description`, `modelClass`, `model`, `fallbackModels`, `thinking`, `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, `defaultContext`, `acceptanceRole`, `disabled`, `skills`, `tools`, and `systemPrompt`.
 
 - `description` replaces the discovered description for builtin and custom agents, which lets list output show deployment-specific routing or model metadata.
 - Use `defaultContext: false` or `acceptanceRole: false` to clear an inherited override.
@@ -179,7 +179,8 @@ Field notes:
 | `extensions` | Omitted means normal extensions; empty means no extensions; list values allowlist specific extensions. |
 | `subagentOnlyExtensions` | Extension paths loaded only in spawned child sessions for this agent. Tools registered there are unavailable to the main agent unless also installed through normal Pi extension configuration. |
 | `model` | Default model. Bare ids prefer the current provider when possible, then unique registry matches. |
-| `fallbackModels` | Ordered backup models for provider/model failures such as quota, auth, timeout, or unavailable model. Ordinary task failures do not trigger fallback. |
+| `modelClass` | Semantic named pool resolved from `subagents.modelPools`; may coexist with concrete frontmatter defaults for portability. |
+| `fallbackModels` | Legacy ordered concrete backups. Named class pools use the same failure classifier and effect-safety rules. |
 | `thinking` | Appended as a `:level` suffix at runtime unless a suffix is already present. |
 | `systemPromptMode` | `replace` by default; `append` keeps Pi's base prompt. |
 | `inheritProjectContext` | Keeps or strips inherited project instruction blocks. |

@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import type { AgentConfig } from "../agents/agents.ts";
 
-export const AGENT_DEFINITION_PROJECTION_VERSION = 1 as const;
-export const LAUNCH_BINDING_PROJECTION_VERSION = 1 as const;
+export const AGENT_DEFINITION_PROJECTION_VERSION = 2 as const;
+export const LAUNCH_BINDING_PROJECTION_VERSION = 2 as const;
 
 function stableJson(value: unknown): string {
 	if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -44,6 +44,7 @@ export function projectAgentDefinition(agent: AgentConfig): Record<string, unkno
 		inheritProjectContext: agent.inheritProjectContext,
 		inheritSkills: agent.inheritSkills,
 		model: agent.model,
+		modelClass: agent.modelClass,
 		fallbackModels: agent.fallbackModels,
 		thinking: agent.thinking,
 		tools: agent.tools,
@@ -79,6 +80,8 @@ export interface LaunchBindingInput {
 	task?: string;
 	model?: string;
 	modelCandidates?: string[];
+	modelClass?: string;
+	modelPoolDigest?: string;
 	thinking?: string;
 	systemPrompt?: string | null;
 	systemPromptMode?: AgentConfig["systemPromptMode"];
@@ -103,6 +106,8 @@ export function projectLaunchBinding(input: LaunchBindingInput): Record<string, 
 		// The ordered candidate set already contains each attempted model; keeping only
 		// this set makes retries correlate to the same preflight binding.
 		modelCandidates: input.modelCandidates,
+		modelClass: input.modelClass,
+		modelPoolDigest: input.modelPoolDigest,
 		thinking: input.thinking,
 		systemPromptDigest: input.systemPrompt === undefined || input.systemPrompt === null ? undefined : sha256(input.systemPrompt),
 		systemPromptMode: input.systemPromptMode,

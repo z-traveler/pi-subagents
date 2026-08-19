@@ -21,6 +21,7 @@ import { listAsyncRuns, formatAsyncRunProgressLabel, type AsyncRunSummary } from
 import { listScheduledRunSummaries } from "../runs/background/scheduled-runs.ts";
 import { SUBAGENT_FANOUT_CHILD_ENV } from "../runs/shared/pi-args.ts";
 import type { SlashSubagentResponse, SlashSubagentUpdate } from "./slash-bridge.ts";
+import { parseModelClass } from "../shared/model-routing.ts";
 import { registerPromptWorkflowCommands } from "./prompt-workflows.ts";
 import { openSubagentsAdmin } from "./subagents-admin.ts";
 import { SUBAGENT_GUIDE_TOPICS } from "../extension/subagent-guide.ts";
@@ -54,10 +55,11 @@ interface InlineConfig {
 	outputMode?: "inline" | "file-only";
 	reads?: string[] | false;
 	model?: string;
+	modelClass?: string;
 	skill?: string[] | false;
 }
 
-const parseInlineConfig = (raw: string): InlineConfig => {
+export const parseInlineConfig = (raw: string): InlineConfig => {
 	const config: InlineConfig = {};
 	for (const part of raw.split(",")) {
 		const trimmed = part.trim();
@@ -71,9 +73,11 @@ const parseInlineConfig = (raw: string): InlineConfig => {
 			case "outputMode": if (val === "inline" || val === "file-only") config.outputMode = val; break;
 			case "reads": config.reads = val === "false" ? false : val.split("+").filter(Boolean); break;
 			case "model": config.model = val || undefined; break;
+			case "modelClass": config.modelClass = parseModelClass(val, "Slash modelClass"); break;
 			case "skill": case "skills": config.skill = val === "false" ? false : val.split("+").filter(Boolean); break;
 		}
 	}
+	if (config.model !== undefined && config.modelClass !== undefined) throw new Error("Slash agent config cannot set both model and modelClass.");
 	return config;
 };
 
@@ -684,6 +688,7 @@ export function registerSlashCommands(
 			if (inline.outputMode !== undefined) child.outputMode = inline.outputMode;
 			if (inline.skill !== undefined) child.skill = inline.skill;
 			if (inline.model) child.model = inline.model;
+			if (inline.modelClass) child.modelClass = inline.modelClass;
 			if (fork) child.context = "fork";
 			launchSlashSubagent(pi, ctx, { workflowScript: slashRunWorkflowScript("run", child), async: bg ? true : false });
 		},

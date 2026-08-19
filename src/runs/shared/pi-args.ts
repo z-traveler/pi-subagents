@@ -223,7 +223,15 @@ export function applyThinkingSuffix(
 	thinking: string | false | undefined,
 	replaceExisting = false,
 ): string | undefined {
-	if (!model || !thinking) return model;
+	if (!model) return model;
+	if (thinking === false) {
+		if (!replaceExisting) return model;
+		const colonIdx = model.lastIndexOf(":");
+		return colonIdx !== -1 && THINKING_LEVELS.some((level) => level === model.substring(colonIdx + 1))
+			? model.slice(0, colonIdx)
+			: model;
+	}
+	if (!thinking) return model;
 	const colonIdx = model.lastIndexOf(":");
 	if (
 		colonIdx !== -1 &&
@@ -232,6 +240,26 @@ export function applyThinkingSuffix(
 		return replaceExisting ? `${model.slice(0, colonIdx)}:${thinking}` : model;
 	}
 	return `${model}:${thinking}`;
+}
+
+export function applyThinkingToModelCandidates(
+	candidates: string[],
+	thinking: string | false | undefined,
+	replaceExisting = false,
+	modelClass?: string,
+): string[] {
+	const resolved: string[] = [];
+	const seen = new Map<string, string>();
+	for (const candidate of candidates) {
+		const effective = applyThinkingSuffix(candidate, thinking, replaceExisting) ?? candidate;
+		const previous = seen.get(effective);
+		if (previous !== undefined && modelClass !== undefined) {
+			throw new Error(`Thinking override collapses model${modelClass ? ` class '${modelClass}'` : ""} candidates '${previous}' and '${candidate}' to the same effective model '${effective}'.`);
+		}
+		seen.set(effective, candidate);
+		resolved.push(effective);
+	}
+	return resolved;
 }
 
 export interface ResolvePiLaunchToolPlanInput {

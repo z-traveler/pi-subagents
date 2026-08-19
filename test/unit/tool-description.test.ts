@@ -34,6 +34,7 @@ describe("registered subagent tool description", () => {
 		assert.match(description, /SINGLE CHILD:.*starts exactly one child through the workflow runtime/i);
 		assert.match(description, /Do not combine agent\/task with action or workflowScript/i);
 		assert.match(description, /runs\.run for one child and runs\.all for parallel children/i);
+		assert.match(description, /modelClass.*semantic tier.*never set both.*stays inside that class/i);
 		assert.match(description, /repository mutation lanes.*worktree:true.*runs\.run\/runs\.all.*managed isolation/i);
 		assert.match(description, /ordinary JavaScript statement body.*explicit return/i);
 		assert.match(description, /Sequential example/i);

@@ -6,8 +6,8 @@ import { discoverAgents, discoverAgentsAll, resolveAgentName, type AgentConfig, 
 import { resolveExecutionAgentScope } from "../agents/agent-scope.ts";
 import { buildSkillInjection, normalizeSkillInput, resolveSkillsWithFallback } from "../agents/skills.ts";
 import { buildAgentMemoryInjection } from "../agents/agent-memory.ts";
-import { buildModelCandidates, resolveEffectiveSubagentModel, type AvailableModelInfo, type ParentModel } from "../runs/shared/model-fallback.ts";
-import { applyThinkingSuffix, resolvePiLaunchToolPlan, type PiLaunchToolPlan } from "../runs/shared/pi-args.ts";
+import { resolveModelRouting, type AvailableModelInfo, type ModelClassSource, type ParentModel } from "../runs/shared/model-fallback.ts";
+import { applyThinkingSuffix, applyThinkingToModelCandidates, resolvePiLaunchToolPlan, type PiLaunchToolPlan } from "../runs/shared/pi-args.ts";
 import { injectOutputPathSystemPrompt, normalizeSingleOutputOverride, resolveSingleOutputPath } from "../runs/shared/single-output.ts";
 import { getArtifactPaths, getArtifactsDir } from "../shared/artifacts.ts";
 import { resolveEffectiveThinking } from "../shared/model-info.ts";
@@ -23,7 +23,7 @@ import { processTerminalCandidatePath, processTerminalPath } from "../runs/backg
 import { resultFilePath } from "../runs/background/result-files.ts";
 import { nestedResultsPath } from "../runs/shared/nested-events.ts";
 
-export const SUBAGENT_LAUNCH_CONTRACT_VERSION = 2 as const;
+export const SUBAGENT_LAUNCH_CONTRACT_VERSION = 3 as const;
 
 export type SubagentLaunchContractReasonCode =
 	| "missing_agent"
@@ -48,6 +48,7 @@ export interface SubagentLaunchContractInput {
 	agentScope?: AgentScope;
 	context?: "fresh" | "fork";
 	model?: string;
+	modelClass?: string;
 	thinking?: string | false;
 	parentModel?: ParentModel;
 	availableModels?: ReadonlyArray<AvailableModelInfo | { provider: string; id: string; fullId?: string; reasoning?: boolean }>;
@@ -140,6 +141,9 @@ export interface SubagentLaunchContract {
 	context: "fresh" | "fork";
 	model?: string;
 	modelCandidates: string[];
+	requestedModelClass?: string;
+	modelClassSource?: ModelClassSource;
+	modelPoolDigest?: string;
 	thinking?: string;
 	systemPromptMode: AgentConfig["systemPromptMode"];
 	inheritProjectContext: boolean;
@@ -261,17 +265,36 @@ export async function resolveSubagentLaunchContract(input: SubagentLaunchContrac
 	if (resolvedSkills.missing.length > 0) diagnostics.push({ code: "missing_skill", severity: "error", message: `Missing skills: ${resolvedSkills.missing.join(", ")}` });
 
 	const externalRunner = agent.runner?.type === "external-cli";
+	if (externalRunner && (input.modelClass !== undefined || agent.modelClass !== undefined)) {
+		return { ok: false, code: "unsupported_mode", message: `Agent '${agent.name}' uses runner.type='external-cli' and does not support modelClass routing.`, diagnostics };
+	}
 	const availableModels = normalizeAvailableModels(input.availableModels);
 	const preferredProvider = input.preferredProvider ?? input.parentModel?.provider;
-	const primaryModel = externalRunner
-		? undefined
-		: resolveEffectiveSubagentModel(input.model, agent.model, input.parentModel, availableModels, preferredProvider, { scope: discovered.modelScope });
+	const routing = externalRunner ? { primaryModel: undefined, modelCandidates: [] } : resolveModelRouting({
+		explicitModel: input.model,
+		explicitModelClass: input.modelClass,
+		agentModel: agent.model,
+		agentFallbackModels: agent.fallbackModels,
+		agentModelClass: agent.modelClass,
+		agentModelClassSource: agent.modelClassSource === "agent-override" ? "agent-override" : "agent-frontmatter",
+		modelPools: discovered.modelPools,
+		modelPoolSources: discovered.modelPoolSources,
+		parentModel: input.parentModel,
+		availableModels,
+		preferredProvider,
+		modelScope: discovered.modelScope,
+	});
+	const primaryModel = routing.primaryModel;
 	const effectiveThinkingConfig = input.thinking !== undefined ? input.thinking : agent.thinking;
 	const model = externalRunner ? undefined : applyThinkingSuffix(primaryModel, effectiveThinkingConfig, input.thinking !== undefined);
 	const modelCandidates = externalRunner
 		? []
-		: buildModelCandidates(primaryModel, agent.fallbackModels, availableModels, preferredProvider, { scope: discovered.modelScope })
-			.map((candidate) => applyThinkingSuffix(candidate, effectiveThinkingConfig, input.thinking !== undefined) ?? candidate);
+		: applyThinkingToModelCandidates(
+			routing.modelCandidates,
+			effectiveThinkingConfig,
+			input.thinking !== undefined,
+			routing.requestedModelClass,
+		);
 	let toolPlan: PiLaunchToolPlan;
 	try {
 		toolPlan = resolvePiLaunchToolPlan({
@@ -338,6 +361,9 @@ export async function resolveSubagentLaunchContract(input: SubagentLaunchContrac
 		context: input.context ?? agent.defaultContext ?? "fresh",
 		...(model ? { model } : {}),
 		modelCandidates,
+		...(routing.requestedModelClass ? { requestedModelClass: routing.requestedModelClass } : {}),
+		...(routing.modelClassSource ? { modelClassSource: routing.modelClassSource } : {}),
+		...(routing.modelPoolDigest ? { modelPoolDigest: routing.modelPoolDigest } : {}),
 		...(resolveEffectiveThinking(model, effectiveThinkingConfig) ? { thinking: resolveEffectiveThinking(model, effectiveThinkingConfig) } : {}),
 		systemPromptMode: agent.systemPromptMode,
 		inheritProjectContext: agent.inheritProjectContext,
@@ -391,6 +417,8 @@ export async function resolveSubagentLaunchContract(input: SubagentLaunchContrac
 			definitionDigest,
 			...(model ? { model } : {}),
 			modelCandidates,
+			...(routing.requestedModelClass ? { modelClass: routing.requestedModelClass } : {}),
+			...(routing.modelPoolDigest ? { modelPoolDigest: routing.modelPoolDigest } : {}),
 			...(resolveEffectiveThinking(model, effectiveThinkingConfig) ? { thinking: resolveEffectiveThinking(model, effectiveThinkingConfig) } : {}),
 			systemPrompt: effectiveSystemPrompt,
 			systemPromptMode: agent.systemPromptMode,

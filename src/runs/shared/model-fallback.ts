@@ -1,6 +1,8 @@
 import type { ModelInfo as AvailableModelInfo } from "../../shared/model-info.ts";
-import type { Usage } from "../../shared/types.ts";
+import type { ModelRoutingSnapshot, Usage } from "../../shared/types.ts";
 import { checkModelScope, type ModelScopeConfig, type ModelScopeViolation, type ModelSource } from "./model-scope.ts";
+import { modelPoolDigest, type ModelPools, type ModelPoolSources } from "../../shared/model-routing.ts";
+import { isMutatingBashCommand } from "./long-running-guard.ts";
 
 export type { AvailableModelInfo };
 
@@ -265,6 +267,108 @@ export interface BuildModelCandidatesOptions {
 	onWarn?: (violation: ModelScopeViolation) => void;
 }
 
+export type ModelClassSource = "per-run" | "agent-override" | "agent-frontmatter";
+
+export interface ModelRoutingResolution {
+	primaryModel?: string;
+	modelCandidates: string[];
+	requestedModelClass?: string;
+	modelClassSource?: ModelClassSource;
+	modelPoolDigest?: string;
+}
+
+export interface ResolveModelRoutingInput {
+	explicitModel?: string;
+	explicitModelClass?: string;
+	agentModel?: string;
+	agentFallbackModels?: string[];
+	agentModelClass?: string;
+	agentModelClassSource?: Exclude<ModelClassSource, "per-run">;
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
+	parentModel?: ParentModel;
+	availableModels?: AvailableModelInfo[];
+	preferredProvider?: string;
+	modelScope?: ModelScopeConfig;
+}
+
+export function toModelRoutingSnapshot(
+	resolution: ModelRoutingResolution,
+	candidates: string[] = resolution.modelCandidates,
+): ModelRoutingSnapshot | undefined {
+	if (!resolution.requestedModelClass || !resolution.modelClassSource || !resolution.modelPoolDigest) return undefined;
+	return {
+		modelClass: resolution.requestedModelClass,
+		source: resolution.modelClassSource,
+		poolDigest: resolution.modelPoolDigest,
+		candidates: [...candidates],
+	};
+}
+
+/** Resolve one launch's concrete ordered candidates without mutating the supplied config. */
+export function resolveModelRouting(input: ResolveModelRoutingInput): ModelRoutingResolution {
+	if (input.explicitModel !== undefined && input.explicitModelClass !== undefined) {
+		throw new Error("A subagent launch cannot set both 'model' and 'modelClass'.");
+	}
+	const requestedModelClass = input.explicitModelClass ?? input.agentModelClass;
+	const modelClassSource: ModelClassSource | undefined = input.explicitModelClass !== undefined
+		? "per-run"
+		: requestedModelClass !== undefined
+			? input.agentModelClassSource ?? "agent-frontmatter"
+			: undefined;
+	const configuredPool = requestedModelClass ? input.modelPools?.[requestedModelClass] : undefined;
+	const configuredPoolSource = requestedModelClass ? input.modelPoolSources?.[requestedModelClass] : undefined;
+	const configuredPoolLabel = configuredPoolSource
+		? ` from ${configuredPoolSource.scope} settings '${configuredPoolSource.path}'`
+		: "";
+	if (requestedModelClass && !configuredPool && (modelClassSource === "per-run" || modelClassSource === "agent-override")) {
+		throw new Error(`Unknown subagent modelClass '${requestedModelClass}'; no matching subagents.modelPools entry is configured.`);
+	}
+	if (configuredPool) {
+		let candidates: string[];
+		try {
+			candidates = buildModelCandidates(
+				configuredPool[0],
+				configuredPool.slice(1),
+				input.availableModels,
+				input.preferredProvider,
+				{ scope: input.modelScope ? { ...input.modelScope, strict: true } : undefined },
+			);
+		} catch (error) {
+			throw new Error(`Model pool '${requestedModelClass}'${configuredPoolLabel} is invalid: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		if (candidates.length !== configuredPool.length) {
+			throw new Error(`Model pool '${requestedModelClass}'${configuredPoolLabel} contains candidates that resolve to the same model: ${configuredPool.join(", ")}.`);
+		}
+		return {
+			primaryModel: candidates[0],
+			modelCandidates: candidates,
+			requestedModelClass,
+			modelClassSource,
+			modelPoolDigest: modelPoolDigest(requestedModelClass!, candidates),
+		};
+	}
+	const primaryModel = resolveEffectiveSubagentModel(
+		input.explicitModel,
+		input.agentModel,
+		input.parentModel,
+		input.availableModels,
+		input.preferredProvider,
+		{ scope: input.modelScope },
+	);
+	return {
+		primaryModel,
+		modelCandidates: buildModelCandidates(
+			primaryModel,
+			input.agentFallbackModels,
+			input.availableModels,
+			input.preferredProvider,
+			{ scope: input.modelScope },
+		),
+		...(requestedModelClass ? { requestedModelClass, modelClassSource } : {}),
+	};
+}
+
 export function buildModelCandidates(
 	primaryModel: string | undefined,
 	fallbackModels: string[] | undefined,
@@ -293,44 +397,6 @@ export function buildModelCandidates(
 	return candidates;
 }
 
-const RETRYABLE_MODEL_FAILURE_PATTERNS = [
-	/rate\s*limit/i,
-	/too many requests/i,
-	/\b429\b/,
-	/quota/i,
-	/billing/i,
-	/credit/i,
-	/auth(?:entication)?/i,
-	/unauthori[sz]ed/i,
-	/forbidden/i,
-	/api key/i,
-	/token expired/i,
-	/invalid key/i,
-	/provider.*unavailable/i,
-	/model.*unavailable/i,
-	/model.*disabled/i,
-	/model.*not found/i,
-	/unknown model/i,
-	/overloaded/i,
-	/service unavailable/i,
-	/temporar(?:ily)? unavailable/i,
-	/connection refused/i,
-	/fetch failed/i,
-	/network error/i,
-	/socket hang up/i,
-	/stream ended without finish_reason/i,
-	/upstream/i,
-	/timed? out/i,
-	/timeout/i,
-	/\b502\b/,
-	/\b503\b/,
-	/\b504\b/,
-	/cold.?start/i,
-	/empty response/i,
-	/no output/i,
-	/model.*(?:load|fail|error)/i,
-];
-
 /**
  * Failures reported as `<tool> failed (exit N): ...` or `<tool> failed with
  * exit code N` come from a tool call inside the child's task, not from the
@@ -340,10 +406,249 @@ const RETRYABLE_MODEL_FAILURE_PATTERNS = [
  */
 const TOOL_FAILURE_PREFIX = /^[\w.:@/-]+ failed (?:(?:\(exit \d+\):)|(?:with exit code \d+))(?:\s|$)/i;
 
+export type ModelFailureCategory = "transient" | "candidate-unavailable" | "failure-domain" | "context" | "policy" | "tool" | "control" | "unknown";
+export type RetryEffectClass = "none" | "workspace" | "external-or-unknown";
+
+const FAILURE_DOMAIN_PATTERNS = [/\b401\b/, /\b403\b/, /quota/i, /billing/i, /credit/i, /auth(?:entication)?/i, /unauthori[sz]ed/i, /forbidden/i, /api key/i, /token expired/i, /invalid key/i];
+const CANDIDATE_UNAVAILABLE_PATTERNS = [/model.*unavailable/i, /model.*disabled/i, /model.*not found/i, /unknown model/i, /model.*(?:load|fail|error)/i, /cold.?start/i];
+const CONTEXT_FAILURE_PATTERNS = [/context (?:window|length)/i, /maximum context/i, /too many tokens/i, /prompt.*too long/i];
+const POLICY_FAILURE_PATTERNS = [/content policy/i, /safety policy/i, /policy refusal/i, /content moderation/i];
+const TRANSIENT_FAILURE_PATTERNS = [
+	/rate\s*limit/i, /too many requests/i, /\b408\b/, /\b409\b/, /\b429\b/, /provider.*unavailable/i, /overloaded/i,
+	/service unavailable/i, /temporar(?:ily)? unavailable/i, /connection refused/i, /fetch failed/i,
+	/network error/i, /socket hang up/i, /stream ended without finish_reason/i, /upstream/i,
+	/timed? out/i, /timeout/i, /\b502\b/, /\b503\b/, /\b504\b/, /empty response/i, /no output/i,
+];
+
+export function classifyModelFailure(input: {
+	error?: string;
+	timedOut?: boolean;
+	stopped?: boolean;
+	interrupted?: boolean;
+	detached?: boolean;
+	turnBudgetExceeded?: boolean;
+	toolBudgetExceeded?: boolean;
+	usageBudgetExceeded?: boolean;
+	protocolError?: boolean;
+	structuredOutputFailed?: boolean;
+	acceptanceRejected?: boolean;
+}): ModelFailureCategory {
+	if (input.stopped || input.interrupted || input.detached || input.timedOut || input.turnBudgetExceeded || input.toolBudgetExceeded || input.usageBudgetExceeded) return "control";
+	if (input.protocolError || input.structuredOutputFailed || input.acceptanceRejected) return "tool";
+	const error = input.error?.trim();
+	if (!error) return "unknown";
+	if (TOOL_FAILURE_PREFIX.test(error)) return "tool";
+	if (CONTEXT_FAILURE_PATTERNS.some((pattern) => pattern.test(error))) return "context";
+	if (POLICY_FAILURE_PATTERNS.some((pattern) => pattern.test(error))) return "policy";
+	if (FAILURE_DOMAIN_PATTERNS.some((pattern) => pattern.test(error))) return "failure-domain";
+	if (CANDIDATE_UNAVAILABLE_PATTERNS.some((pattern) => pattern.test(error))) return "candidate-unavailable";
+	if (TRANSIENT_FAILURE_PATTERNS.some((pattern) => pattern.test(error))) return "transient";
+	return "unknown";
+}
+
+const READ_ONLY_RETRY_TOOLS = new Set(["read", "grep", "find", "ls", "glob", "rg"]);
+const WORKSPACE_RETRY_TOOLS = new Set(["edit", "write", "apply_patch"]);
+const EXTERNAL_BASH_EFFECT = /(?:^|[;&|()\s])(?:git\s+(?:(?:-[Cc]\s+\S+|--(?:git-dir|work-tree)=?\S*|--paginate)\s+)*push|(?:npm|pnpm|yarn)\s+(?:npm\s+)?publish|gh\s+release\s+(?:create|upload)|curl\b|wget\b|ssh\b|scp\b|rsync\b)/i;
+const READ_ONLY_BASH_SEGMENT = /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S+)\s+)*(?::|true|false|cd|pwd|ls|find|rg|grep|glob|cat|head|tail|wc|sort|uniq|cut|tr|stat|readlink|realpath|test|\[|echo|printf|git\s+(?:(?:(?:-C|--git-dir|--work-tree)\s+\S+|(?:--git-dir|--work-tree)=\S+|--paginate)\s+)*(?:status|diff|log|show|rev-parse)\b)/i;
+
+function bashCommandFromArgs(args: string | undefined): string {
+	if (!args) return "";
+	try {
+		const parsed = JSON.parse(args) as unknown;
+		const command = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+			? (parsed as Record<string, unknown>).command
+			: undefined;
+		if (typeof command === "string") return command;
+	} catch {
+		// Foreground progress stores a bounded command preview rather than JSON.
+	}
+	return args;
+}
+
+function splitBashCommandSegments(command: string): string[] {
+	const segments: string[] = [];
+	let current = "";
+	let inSingle = false;
+	let inDouble = false;
+	let escaped = false;
+	const flush = () => {
+		const segment = current.trim();
+		if (segment) segments.push(segment);
+		current = "";
+	};
+	for (let index = 0; index < command.length; index++) {
+		const char = command[index]!;
+		if (escaped) {
+			current += char;
+			escaped = false;
+			continue;
+		}
+		if (char === "\\" && !inSingle) {
+			current += char;
+			escaped = true;
+			continue;
+		}
+		if (char === "'" && !inDouble) {
+			inSingle = !inSingle;
+			current += char;
+			continue;
+		}
+		if (char === '"' && !inSingle) {
+			inDouble = !inDouble;
+			current += char;
+			continue;
+		}
+		if (!inSingle && !inDouble && (char === ";" || char === "|" || char === "&" || char === "\n" || char === "(" || char === ")")) {
+			flush();
+			if ((char === "|" || char === "&") && command[index + 1] === char) index++;
+			continue;
+		}
+		current += char;
+	}
+	flush();
+	return segments;
+}
+
+function hasShellCommandSubstitution(command: string): boolean {
+	let inSingle = false;
+	let inDouble = false;
+	let escaped = false;
+	for (let index = 0; index < command.length; index++) {
+		const char = command[index]!;
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (char === "\\" && !inSingle) {
+			escaped = true;
+			continue;
+		}
+		if (char === "'" && !inDouble) {
+			inSingle = !inSingle;
+			continue;
+		}
+		if (char === '"' && !inSingle) {
+			inDouble = !inDouble;
+			continue;
+		}
+		if (inSingle) continue;
+		if (char === "`" || (char === "$" && command[index + 1] === "(")) return true;
+	}
+	return false;
+}
+
+function classifyBashRetryEffect(command: string): RetryEffectClass {
+	if (hasShellCommandSubstitution(command)) return "external-or-unknown";
+	let workspace = false;
+	const segments = splitBashCommandSegments(command);
+	if (segments.length === 0) return "external-or-unknown";
+	for (const segment of segments) {
+		if (EXTERNAL_BASH_EFFECT.test(segment)) return "external-or-unknown";
+		if (isMutatingBashCommand(segment)) {
+			workspace = true;
+			continue;
+		}
+		if (READ_ONLY_BASH_SEGMENT.test(segment)) continue;
+		return "external-or-unknown";
+	}
+	return workspace ? "workspace" : "none";
+}
+
+export function classifyRetryEffects(input: {
+	toolCount?: number;
+	recentTools?: Array<{ tool: string; args?: string; endMs?: number }>;
+	fileMutationAttempted?: boolean;
+}): RetryEffectClass {
+	const toolCount = input.toolCount ?? input.recentTools?.length ?? 0;
+	const recentTools = input.recentTools ?? [];
+	if (toolCount === 0 && !input.fileMutationAttempted) return "none";
+	if (recentTools.length < toolCount) return "external-or-unknown";
+	let workspace = input.fileMutationAttempted === true;
+	for (const entry of recentTools) {
+		const tool = entry.tool.trim().toLowerCase();
+		if (WORKSPACE_RETRY_TOOLS.has(tool) || (tool === "cursor" && /\b(?:edit|write)\b/i.test(entry.args ?? ""))) {
+			workspace = true;
+			continue;
+		}
+		if (tool === "bash") {
+			const command = bashCommandFromArgs(entry.args);
+			const effect = classifyBashRetryEffect(command);
+			if (effect === "external-or-unknown") return effect;
+			if (effect === "workspace") workspace = true;
+			continue;
+		}
+		if (READ_ONLY_RETRY_TOOLS.has(tool)) continue;
+		return "external-or-unknown";
+	}
+	return workspace ? "workspace" : "none";
+}
+
+function modelProvider(model: string | undefined): string | undefined {
+	if (!model) return undefined;
+	const { baseModel } = splitThinkingSuffix(model);
+	const slash = baseModel.indexOf("/");
+	return slash > 0 ? normalizeModelSegment(baseModel.slice(0, slash)) : undefined;
+}
+
+export type ModelFailoverDecision =
+	| { retry: true; mode: "restart" | "resume" }
+	| { retry: false; reason: string };
+
+export function decideModelFailover(input: {
+	category: ModelFailureCategory;
+	currentModel?: string;
+	nextModel?: string;
+	effects: RetryEffectClass;
+}): ModelFailoverDecision {
+	if (!input.nextModel) return { retry: false, reason: "no-candidate" };
+	if (input.effects === "external-or-unknown") return { retry: false, reason: "external-or-unknown-effects" };
+	if (input.category !== "transient" && input.category !== "candidate-unavailable" && input.category !== "failure-domain") {
+		return { retry: false, reason: input.category };
+	}
+	if (input.category === "failure-domain") {
+		const currentProvider = modelProvider(input.currentModel);
+		const nextProvider = modelProvider(input.nextModel);
+		if (!currentProvider || !nextProvider || currentProvider === nextProvider) return { retry: false, reason: "same-failure-domain" };
+	}
+	return { retry: true, mode: input.effects === "workspace" ? "resume" : "restart" };
+}
+
+export function selectModelFailover(input: {
+	category: ModelFailureCategory;
+	currentModel?: string;
+	candidates: string[];
+	currentIndex: number;
+	effects: RetryEffectClass;
+}): { decision: ModelFailoverDecision; nextIndex?: number; skippedModels: string[]; failureDomain?: string } {
+	let nextIndex = input.currentIndex + 1;
+	const skippedModels: string[] = [];
+	let decision = decideModelFailover({
+		category: input.category,
+		currentModel: input.currentModel,
+		nextModel: input.candidates[nextIndex],
+		effects: input.effects,
+	});
+	while (!decision.retry && input.category === "failure-domain" && decision.reason === "same-failure-domain" && nextIndex < input.candidates.length) {
+		skippedModels.push(input.candidates[nextIndex]!);
+		nextIndex += 1;
+		decision = decideModelFailover({
+			category: input.category,
+			currentModel: input.currentModel,
+			nextModel: input.candidates[nextIndex],
+			effects: input.effects,
+		});
+	}
+	return {
+		decision,
+		...(decision.retry ? { nextIndex } : {}),
+		skippedModels,
+		...(modelProvider(input.currentModel) ? { failureDomain: modelProvider(input.currentModel) } : {}),
+	};
+}
+
 export function isRetryableModelFailure(error: string | undefined): boolean {
-	if (!error) return false;
-	if (TOOL_FAILURE_PREFIX.test(error.trim())) return false;
-	return RETRYABLE_MODEL_FAILURE_PATTERNS.some((pattern) => pattern.test(error));
+	const category = classifyModelFailure({ error });
+	return category === "transient" || category === "candidate-unavailable" || category === "failure-domain";
 }
 
 export function formatModelAttemptNote(attempt: ModelAttemptSummary, nextModel?: string): string {

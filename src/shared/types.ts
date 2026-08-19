@@ -335,7 +335,7 @@ export interface EffectsProjection {
 	fileMutation?: FileMutationEffect;
 }
 
-export const SUBAGENT_LIFECYCLE_ARTIFACT_VERSION = 3;
+export const SUBAGENT_LIFECYCLE_ARTIFACT_VERSION = 4;
 export type SubagentLifecycleArtifactVersion = typeof SUBAGENT_LIFECYCLE_ARTIFACT_VERSION;
 
 export type ProcessTerminalState = "pending" | "observed" | "unknown" | "not-started";
@@ -499,7 +499,7 @@ export interface RunFanoutRejection extends RunFanoutBudgetSnapshot {
 }
 
 export interface SteeringRecoveryDescriptor {
-	version: 1;
+	version: 1 | 2;
 	launchContractDigest?: string;
 	runFanoutBudget: RunFanoutBudgetDescriptor;
 	sourceRunId: string;
@@ -508,6 +508,7 @@ export interface SteeringRecoveryDescriptor {
 	sessionFile?: string;
 	cwd: string;
 	model?: string;
+	modelRouting?: ModelRoutingSnapshot;
 	fallbackModels?: string[];
 	thinking?: string;
 	tools?: string[];
@@ -545,7 +546,7 @@ export interface SteeringRecoveryDescriptor {
 
 export type PublicNestedStepSummary = Pick<
 	NestedStepSummary,
-	"agent" | "status" | "model" | "thinking" | "sessionFile" | "transcriptPath" | "transcriptError" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "toolBudget" | "toolBudgetBlocked" | "startedAt" | "endedAt" | "error" | "timedOut" | "stopped"
+	"agent" | "status" | "model" | "modelRouting" | "thinking" | "sessionFile" | "transcriptPath" | "transcriptError" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "toolBudget" | "toolBudgetBlocked" | "startedAt" | "endedAt" | "error" | "timedOut" | "stopped"
 > & {
 	children?: PublicNestedRunSummary[];
 };
@@ -673,6 +674,21 @@ export interface ModelAttempt {
 	exitCode?: number | null;
 	error?: string;
 	usage?: Usage;
+	failureCategory?: import("../runs/shared/model-fallback.ts").ModelFailureCategory;
+	failureDomain?: string;
+	effects?: import("../runs/shared/model-fallback.ts").RetryEffectClass;
+	retryMode?: "restart" | "resume";
+	nextModel?: string;
+	skippedModels?: string[];
+	failoverReason?: string;
+	retryBlockedReason?: string;
+}
+
+export interface ModelRoutingSnapshot {
+	modelClass: string;
+	source: "per-run" | "agent-override" | "agent-frontmatter";
+	poolDigest: string;
+	candidates: string[];
 }
 
 export type AcceptanceLevel = "auto" | "none" | "attested" | "checked" | "verified";
@@ -924,6 +940,7 @@ export interface SingleResult {
 	messages?: Message[];
 	usage: Usage;
 	model?: string;
+	modelRouting?: ModelRoutingSnapshot;
 	/** Effective thinking level used by this foreground child, when known. */
 	thinking?: string;
 	attemptedModels?: string[];
@@ -1168,6 +1185,7 @@ export interface NestedStepSummary {
 	agent: string;
 	status: "pending" | "running" | "complete" | "completed" | "failed" | "paused" | "stopped" | "rejected";
 	model?: string;
+	modelRouting?: ModelRoutingSnapshot;
 	thinking?: string;
 	sessionFile?: string;
 	transcriptPath?: string;
@@ -1426,6 +1444,7 @@ export interface AsyncStatus {
 		tokens?: TokenUsage;
 		skills?: string[];
 		model?: string;
+		modelRouting?: ModelRoutingSnapshot;
 		thinking?: string;
 		attemptedModels?: string[];
 		modelAttempts?: ModelAttempt[];
@@ -1811,6 +1830,10 @@ export interface RunSyncOptions {
 	nestedRoute?: NestedRouteInfo;
 	/** Override the agent's default model (format: "provider/id" or just "id") */
 	modelOverride?: string;
+	/** Frozen ordered candidates resolved by model-class routing for this launch. */
+	modelCandidates?: string[];
+	/** Frozen semantic class, source, digest, and candidates for observability/resume. */
+	modelRouting?: ModelRoutingSnapshot;
 	/** LLM intent arbiter for the completion mutation guard (rescues read-only review runs). */
 	llmIntentArbiter?: import("../runs/shared/llm-intent-arbiter.ts").TaskMutationArbiter;
 	/** Override the agent's default thinking level for this run */

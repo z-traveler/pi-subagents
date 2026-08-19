@@ -5,10 +5,12 @@ How subagents pick models, and how to change that.
 Builtin agents inherit your current Pi default model. This keeps new installs from depending on a provider you may not have configured. From there you can layer defaults and overrides:
 
 - `subagents.defaultModel` — a default for every subagent that does not set its own model.
+- `subagents.modelPools.<class>` — an ordered pool behind a semantic class such as `fast`, `medium`, or `smart`.
+- `subagents.agentOverrides.<name>.modelClass` — route one role through a named pool.
 - `subagents.agentOverrides.<name>.model` — pin one role.
 - Per-run overrides — for one launch only.
 
-Precedence, strongest first: per-run override → agent frontmatter `model` → `agentOverrides.<name>.model` → `subagents.defaultModel` → the parent session model.
+Precedence, strongest first: per-run `model` → per-run `modelClass` → `agentOverrides.<name>.model` → mapped class (`agentOverrides.<name>.modelClass` before frontmatter `modelClass`) → frontmatter `model` → `subagents.defaultModel` → the parent session model. One override object cannot set both `model` and `modelClass`; agent frontmatter may keep both so its concrete model remains a portable fallback when a deployment has no mapping for that frontmatter class.
 
 ## Setting defaults and overrides
 
@@ -52,6 +54,33 @@ For a persistent role override with a backup model for provider failures:
 
 `subagents.defaultModel` applies to builtin, package, user, and project agents that do not set `model` in frontmatter. Per-run model overrides and `agentOverrides.<name>.model` still win, and explicit agent frontmatter still wins over the global default. The same `agentOverrides` block can change `tools`, `skills`, inherited context, prompt text, or disable a builtin (see [agents.md](agents.md)). Matching user and project agents also receive override fields that their frontmatter leaves unset, so a shared project config agent can keep the persona while local settings choose the model.
 
+## Named model classes and same-class failover
+
+Use lowercase kebab-case class names. Each pool is ordered; a project pool replaces the user pool with the same name as one unit rather than merging candidates.
+
+```json
+{
+  "subagents": {
+    "modelPools": {
+      "fast": ["deepseek/deepseek-v4-flash:off", "openai-codex/gpt-5.6-luna:off"],
+      "medium": ["openai-codex/gpt-5.6-terra:medium", "deepseek/deepseek-v4-pro:medium"],
+      "smart": ["openai-codex/gpt-5.6-sol:high", "anthropic/claude-fable-5:medium"]
+    },
+    "agentOverrides": {
+      "scout": { "modelClass": "fast" },
+      "worker": { "modelClass": "medium" },
+      "oracle": { "modelClass": "smart" }
+    }
+  }
+}
+```
+
+Per-run forms are `modelClass: "smart"` in structured calls/workflow children and `/run oracle[modelClass=smart] ...`. An explicit per-run or agent-override class must exist. An unmapped frontmatter class falls back to its concrete `model`/`fallbackModels`, then the normal defaults.
+
+The pool is resolved and frozen when the child launches. Status/results expose `modelRouting` with the class, source, pool digest, and candidates; retained resume uses that frozen candidate set even if settings later change.
+
+Failover stays inside the selected class. Transient/provider-unavailable failures may try the next candidate; auth, billing, and quota failures cross only to a different provider. Context-window, policy, tool, control, and unknown task failures do not fail over. A candidate is attempted at most once because Pi core already owns request-level retries. No-tool/read-only failures restart on the next candidate; workspace edits continue in the retained session; external or unknown effects block automatic failover to avoid duplicate side effects.
+
 ## Recommended model tiering (optional)
 
 A setup that works well in practice: route agents by task shape instead of running everything on one model. Four tiers:
@@ -63,7 +92,7 @@ A setup that works well in practice: route agents by task shape instead of runni
 
 The routing rule: use the capability tiers (1–3) when the task is well-scoped, and the intent tier (4) when scoping or judging is the task itself.
 
-Give tier-4 agents cross-provider `fallbackModels` so subscription usage limits degrade gracefully instead of failing the run. Fallback triggers on rate-limit and overload errors automatically:
+Give tier-4 agents a cross-provider `modelClass` pool (or legacy `fallbackModels`) so subscription usage limits degrade gracefully instead of failing the run:
 
 ```yaml
 ---

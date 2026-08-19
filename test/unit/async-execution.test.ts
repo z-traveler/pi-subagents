@@ -147,4 +147,23 @@ describe("async runner execution", () => {
 		assert.ok("steps" in result, "expected successful step build");
 		assert.deepEqual(result.steps[0]?.toolBudget, { hard: 5, block: ["ls"] });
 	});
+
+	it("freezes a named model pool into async runner candidates", () => {
+		const result = buildAsyncRunnerSteps("tiered-run", {
+			chain: [{ agent: "worker", task: "hard task", modelClass: "smart" }],
+			agents: [agent("worker")],
+			ctx,
+			availableModels: [
+				{ provider: "openai", id: "smart-a", fullId: "openai/smart-a" },
+				{ provider: "anthropic", id: "smart-b", fullId: "anthropic/smart-b" },
+			],
+			modelPools: { smart: ["openai/smart-a", "anthropic/smart-b"] },
+			asyncDir: path.join(process.cwd(), ".tmp-model-class-test"),
+			maxSubagentDepth: 2,
+		});
+		assert.ok("steps" in result);
+		assert.deepEqual(result.steps[0]?.modelCandidates, ["openai/smart-a", "anthropic/smart-b"]);
+		assert.equal(result.steps[0]?.modelRouting?.modelClass, "smart");
+		assert.equal(result.steps[0]?.modelRouting?.source, "per-run");
+	});
 });

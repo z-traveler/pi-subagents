@@ -158,6 +158,15 @@ try {
 }
 
 describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not available" : undefined }, () => {
+	it("exposes modelClass independently from concrete model overrides", () => {
+		const properties = SubagentParams?.properties as Record<string, JsonSchemaNode> | undefined;
+		assert.equal(properties?.modelClass?.type, "string");
+		assert.match(String(properties?.modelClass?.description ?? ""), /named model pool/i);
+		assert.equal((schemas.ParallelTaskSchema as JsonSchemaNode).properties?.modelClass?.type, "string");
+		assert.equal((schemas.DynamicParallelTemplateSchema as JsonSchemaNode).properties?.modelClass?.type, "string");
+		assert.equal((schemas.ChainItem as JsonSchemaNode).properties?.modelClass?.type, "string");
+	});
+
 	it("includes context field for fresh/fork execution mode", () => {
 		const contextSchema = SubagentParams?.properties?.context;
 		assert.ok(contextSchema, "context schema should exist");
@@ -389,7 +398,7 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		const schema = SubagentParams as unknown as JsonSchemaNode;
 		const serialized = JSON.stringify(schema);
 		// Mission, inspector, inline workflow, guide, and toolTimeoutMs fields intentionally expanded the public tool surface.
-		assert.ok(serialized.length < 17_400, `expected compact schema under 17.4k chars, got ${serialized.length}`);
+		assert.ok(serialized.length < 17_700, `expected compact schema under 17.7k chars, got ${serialized.length}`);
 		assert.equal(serialized.includes('"$ref"'), false);
 		assert.equal(serialized.includes('"$defs"'), false);
 		assert.equal(serialized.split("Optional acceptance policy.").length - 1, 1);

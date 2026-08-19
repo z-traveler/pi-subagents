@@ -24,6 +24,7 @@ export interface RunnerSubagentStep {
 	model?: string;
 	thinking?: string;
 	modelCandidates?: string[];
+	modelRouting?: import("../../shared/types.ts").ModelRoutingSnapshot;
 	tools?: string[];
 	extensions?: string[];
 	subagentOnlyExtensions?: string[];

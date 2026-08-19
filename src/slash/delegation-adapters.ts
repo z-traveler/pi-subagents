@@ -118,6 +118,7 @@ export interface DelegatedSubagentExecutionParams {
 	task?: string;
 	context: "fresh" | "fork";
 	model?: string;
+	modelClass?: string;
 	cwd: string;
 	timeoutMs?: number;
 	turnBudget?: TurnBudgetConfig;
@@ -293,6 +294,7 @@ export function toSubagentDelegationExecutionParams(request: SubagentDelegationR
 		context: request.context,
 		cwd: request.cwd,
 		model: request.model,
+		...(request.modelClass ? { modelClass: request.modelClass } : {}),
 		timeoutMs: request.timeoutMs,
 		turnBudget: request.turnBudget,
 		enforceHardTurnLimit: true,

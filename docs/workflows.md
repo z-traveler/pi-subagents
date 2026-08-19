@@ -37,6 +37,8 @@ Add `autofix` to `/parallel-review` or `/parallel-cleanup` to apply only the syn
 
 All model-facing subagent execution is expressed through `workflowScript` in the `subagent` tool. Use stable keys and ordinary JavaScript for one child, sequence, and parallelism. Scripts are ordinary JavaScript statement bodies. Use an explicit `return` for a useful result:
 
+Workflow defaults and individual `runs.run`/`runs.all` children accept `modelClass` as the semantic alternative to a concrete `model`. Child values override workflow defaults; setting both on one child is rejected.
+
 ```js
 subagent({ workflowScript: `
   const scan = await runs.run("scan", { agent: "scout", task: "Scan the codebase" });

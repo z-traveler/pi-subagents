@@ -9,6 +9,7 @@ export const KNOWN_FIELDS = new Set([
 	"alias",
 	"aliases",
 	"tools",
+	"modelClass",
 	"model",
 	"fallbackModels",
 	"thinking",
@@ -67,6 +68,7 @@ export function serializeAgent(config: AgentConfig, options: SerializeAgentOptio
 	const toolsValue = joinComma(tools);
 	if (toolsValue || preserve("tools")) lines.push(`tools: ${toolsValue ?? ""}`);
 
+	if (config.modelClass || preserve("modelClass")) lines.push(`modelClass: ${config.modelClass ?? ""}`);
 	if (config.model || preserve("model")) lines.push(`model: ${config.model ?? ""}`);
 	const fallbackModelsValue = joinComma(config.fallbackModels);
 	if (fallbackModelsValue || preserve("fallbackModels")) lines.push(`fallbackModels: ${fallbackModelsValue ?? ""}`);

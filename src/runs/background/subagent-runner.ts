@@ -82,7 +82,7 @@ import { readChildToolDiagnosticError } from "../shared/tool-availability.ts";
 import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelStep, validateDynamicCollection } from "../shared/dynamic-fanout.ts";
 import { claimRunFanoutBatch, getRunFanoutBudgetSnapshot } from "../shared/run-fanout-budget.ts";
 import { nestedSummaryFromAsyncStatus, projectNestedEvents, resolveNestedAsyncDir, writeNestedEvent } from "../shared/nested-events.ts";
-import { formatModelAttemptNote, isRetryableModelFailure } from "../shared/model-fallback.ts";
+import { classifyModelFailure, classifyRetryEffects, formatModelAttemptNote, selectModelFailover } from "../shared/model-fallback.ts";
 import {
 	SUBAGENT_STARTUP_RETRY_DELAYS_MS,
 	formatSubagentExtensionConflictError,
@@ -228,6 +228,7 @@ interface StepResult {
 	sessionFile?: string;
 	intercomTarget?: string;
 	model?: string;
+	modelRouting?: import("../../shared/types.ts").ModelRoutingSnapshot;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	totalCost?: CostSummary;
@@ -520,6 +521,7 @@ interface RunPiStreamingResult {
 	toolBudget?: ToolBudgetState;
 	toolBudgetBlocked?: boolean;
 	observedMutationAttempt?: boolean;
+	recentTools?: Array<{ tool: string; args: string; endMs: number }>;
 	structuredOutputToolInvoked?: boolean;
 	structuredOutputMessageStartIndex?: number;
 	watchdog?: ChildWatchdogStateSnapshot;
@@ -597,6 +599,7 @@ function runPiStreaming(
 		let structuredOutputToolInvoked = false;
 		let structuredOutputMessageStartIndex: number | undefined;
 		let toolCount = 0;
+		const recentTools: Array<{ tool: string; args: string; endMs: number }> = [];
 		const childWatchdogConfig = decodeChildWatchdogConfig(env?.[CHILD_WATCHDOG_CONFIG_ENV]);
 		let childWatchdogState: ChildWatchdogStateSnapshot | undefined;
 		let applyChildLifecycle = (_action: ChildLifecycleAction): void => {};
@@ -692,6 +695,7 @@ function runPiStreaming(
 
 			if (event.type === "tool_execution_start" && event.toolName) {
 				toolCount += 1;
+				recentTools.push({ tool: event.toolName, args: JSON.stringify(event.args ?? {}), endMs: Date.now() - startedAt });
 				armToolTimeout({ toolCallId: (event as { toolCallId?: unknown }).toolCallId, toolName: event.toolName });
 				if (event.toolName === "structured_output") {
 					structuredOutputToolInvoked = true;
@@ -1001,6 +1005,7 @@ function runPiStreaming(
 				turnBudgetExceeded,
 				wrapUpRequested: turnBudget?.outcome === "wrap-up-requested" || turnBudget?.outcome === "termination-deferred" || turnBudgetExceeded || undefined,
 				observedMutationAttempt,
+				recentTools,
 				structuredOutputToolInvoked,
 				structuredOutputMessageStartIndex,
 				watchdog: childWatchdogState,
@@ -1030,7 +1035,7 @@ function runPiStreaming(
 			const stderr = stderrTail.text();
 			const finalOutput = getFinalOutput(messages) || rawStdoutTail.text().trim();
 			const spawnErrorMessage = spawnError instanceof Error ? spawnError.message : String(spawnError);
-			resolve(omitUndefinedProperties({ stderr, exitCode: 1, messages, usage, toolCount, durationMs: Date.now() - startedAt, model, error: stopped ? (stopMessage ?? "Subagent stopped by user.") : timedOut ? (timeoutMessage ?? "Subagent timed out.") : turnBudgetExceeded ? turnBudgetMessage : error ?? assistantError ?? spawnErrorMessage, protocolError, finalOutput: (timedOut || stopped) && !finalOutput.trim() ? (stopped ? stopMessage ?? "Subagent stopped by user." : timeoutMessage ?? "Subagent timed out.") : finalOutput, outputState: finalOutput.trim() ? "present" : "absent", timedOut, stopped, turnBudget, turnBudgetExceeded, wrapUpRequested: turnBudget?.outcome === "wrap-up-requested" || turnBudget?.outcome === "termination-deferred" || turnBudgetExceeded || undefined, observedMutationAttempt, structuredOutputToolInvoked, structuredOutputMessageStartIndex, watchdog: childWatchdogState, processInstanceId, processTree: { state: "unknown", reason: "verification-failed", diagnostic: spawnErrorMessage } }));
+			resolve(omitUndefinedProperties({ stderr, exitCode: 1, messages, usage, toolCount, recentTools, durationMs: Date.now() - startedAt, model, error: stopped ? (stopMessage ?? "Subagent stopped by user.") : timedOut ? (timeoutMessage ?? "Subagent timed out.") : turnBudgetExceeded ? turnBudgetMessage : error ?? assistantError ?? spawnErrorMessage, protocolError, finalOutput: (timedOut || stopped) && !finalOutput.trim() ? (stopped ? stopMessage ?? "Subagent stopped by user." : timeoutMessage ?? "Subagent timed out.") : finalOutput, outputState: finalOutput.trim() ? "present" : "absent", timedOut, stopped, turnBudget, turnBudgetExceeded, wrapUpRequested: turnBudget?.outcome === "wrap-up-requested" || turnBudget?.outcome === "termination-deferred" || turnBudgetExceeded || undefined, observedMutationAttempt, structuredOutputToolInvoked, structuredOutputMessageStartIndex, watchdog: childWatchdogState, processInstanceId, processTree: { state: "unknown", reason: "verification-failed", diagnostic: spawnErrorMessage } }));
 		});
 	});
 }
@@ -1246,6 +1251,7 @@ async function runSingleStepInner(
 				sessionFile: imported.sessionFile,
 				intercomTarget: imported.intercomTarget,
 				model: imported.model,
+				modelRouting: imported.modelRouting,
 				attemptedModels: imported.attemptedModels,
 				modelAttempts: imported.modelAttempts,
 				totalCost: imported.totalCost,
@@ -1386,6 +1392,7 @@ async function runSingleStepInner(
 	// Escalated to "file" after an unexplained zero-activity startup failure so
 	// retries keep the task text out of argv (endpoint pre-exec scans may deny it).
 	let taskDeliveryOverride: SubagentTaskDelivery | undefined;
+	let attemptTask = task;
 	modelAttemptsLoop: while (modelIndex < candidates.length) {
 		if (ctx.timeoutSignal?.aborted || ctx.stopSignal?.aborted || ctx.skipAcceptance?.()) break;
 		const candidate = candidates[modelIndex];
@@ -1410,7 +1417,7 @@ async function runSingleStepInner(
 		const { args, env, tempDir, toolDiagnosticPath, runtimeAcknowledgedExtensionsPath, capabilityAudit: attemptCapabilityAudit } = buildPiArgs(omitUndefinedProperties({
 			parentSessionId: step.parentSessionId,
 			baseArgs: ["--mode", "json", "-p"],
-			task,
+			task: attemptTask,
 			taskDelivery: taskDeliveryOverride,
 			sessionEnabled,
 			sessionDir,
@@ -1471,6 +1478,8 @@ async function runSingleStepInner(
 				task: step.launchBindingTask ?? task,
 				...(candidate ? { model: candidate } : {}),
 				modelCandidates: candidates as string[],
+				...(step.modelRouting?.modelClass ? { modelClass: step.modelRouting.modelClass } : {}),
+				...(step.modelRouting?.poolDigest ? { modelPoolDigest: step.modelRouting.poolDigest } : {}),
 				...(resolveEffectiveThinking(candidate, step.thinking) ? { thinking: resolveEffectiveThinking(candidate, step.thinking) } : {}),
 				systemPrompt: appendTurnBudgetSystemPrompt(step.systemPrompt ?? "", ctx.turnBudget),
 				systemPromptMode: step.systemPromptMode,
@@ -1668,7 +1677,7 @@ async function runSingleStepInner(
 			stopped: run.stopped,
 			turnBudgetExceeded: run.turnBudgetExceeded,
 		}));
-		const retryDelayMs = SUBAGENT_STARTUP_RETRY_DELAYS_MS[startupAttemptIndex];
+		const retryDelayMs = step.modelRouting ? undefined : SUBAGENT_STARTUP_RETRY_DELAYS_MS[startupAttemptIndex];
 		if (startupFailure && retryDelayMs !== undefined) {
 			const retryNote = formatSubagentStartupRetryNote({
 				model: attempt.model,
@@ -1697,9 +1706,42 @@ async function runSingleStepInner(
 			finalResult.finalOutput = startupError;
 			break modelAttemptsLoop;
 		}
-		if (!isRetryableModelFailure(error) || modelIndex === candidates.length - 1) break modelAttemptsLoop;
-		attemptNotes.push(formatModelAttemptNote(attempt, candidates[modelIndex + 1]));
-		modelIndex += 1;
+		const failureCategory = classifyModelFailure({
+			error,
+			timedOut: run.timedOut,
+			stopped: run.stopped,
+			interrupted: run.interrupted,
+			turnBudgetExceeded: run.turnBudgetExceeded,
+			toolBudgetExceeded: toolBudgetBlocked,
+			protocolError: run.protocolError !== undefined,
+			structuredOutputFailed: structuredError !== undefined,
+		});
+		const effects = classifyRetryEffects({
+			toolCount: run.toolCount,
+			recentTools: run.recentTools,
+			fileMutationAttempted: run.observedMutationAttempt,
+		});
+		attempt.failureCategory = failureCategory;
+		attempt.effects = effects;
+		const selection = selectModelFailover({ category: failureCategory, currentModel: candidate, candidates: candidates as string[], currentIndex: modelIndex, effects });
+		const { decision } = selection;
+		attempt.failureDomain = selection.failureDomain;
+		attempt.skippedModels = selection.skippedModels.length > 0 ? selection.skippedModels : undefined;
+		if (!decision.retry) {
+			attempt.retryBlockedReason = decision.reason;
+			attempt.failoverReason = decision.reason;
+			break modelAttemptsLoop;
+		}
+		const nextIndex = selection.nextIndex!;
+		const nextModel = candidates[nextIndex];
+		attempt.retryMode = decision.mode;
+		attempt.nextModel = nextModel;
+		attempt.failoverReason = `${failureCategory}:${decision.mode}`;
+		attemptNotes.push(formatModelAttemptNote(attempt, nextModel));
+		if (decision.mode === "resume") {
+			attemptTask = `${task}\n\n[Model failover continuation]\nA previous same-class model attempt changed the workspace before failing. Inspect the existing session and workspace state, continue from that state, and do not repeat completed external actions.`;
+		}
+		modelIndex = nextIndex;
 		startupAttemptIndex = 0;
 	}
 
@@ -1803,6 +1845,7 @@ async function runSingleStepInner(
 				task: PROMPT_REDACTED,
 				exitCode: effectiveFinalExitCode,
 				model: finalResult?.model,
+				modelRouting: step.modelRouting,
 				attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 				modelAttempts,
 				error: effectiveFinalError,
@@ -1832,6 +1875,7 @@ async function runSingleStepInner(
 		sessionFile: step.sessionFile,
 		intercomTarget: ctx.childIntercomTarget,
 		model: finalResult?.model,
+		modelRouting: step.modelRouting ? { ...step.modelRouting, candidates: [...step.modelRouting.candidates] } : undefined,
 		attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 		modelAttempts,
 		totalCost: costSummaryFromAttempts(modelAttempts),
@@ -2423,6 +2467,7 @@ async function runSubagent(
 				success: statusResultSuccess(state, step),
 				sessionFile: step.sessionFile,
 				model: step.model,
+				modelRouting: step.modelRouting,
 				attemptedModels: step.attemptedModels,
 				modelAttempts: step.modelAttempts,
 			})),
@@ -3906,6 +3951,7 @@ async function runSubagent(
 					sessionFile: pr.sessionFile,
 					intercomTarget: pr.intercomTarget,
 					model: pr.model,
+					modelRouting: pr.modelRouting,
 					attemptedModels: pr.attemptedModels,
 					modelAttempts: pr.modelAttempts,
 					totalCost: pr.totalCost,
@@ -4330,6 +4376,7 @@ async function runSubagent(
 						sessionFile: pr.sessionFile,
 						intercomTarget: pr.intercomTarget,
 						model: pr.model,
+						modelRouting: pr.modelRouting,
 						attemptedModels: pr.attemptedModels,
 						modelAttempts: pr.modelAttempts,
 						totalCost: pr.totalCost,
@@ -4513,6 +4560,7 @@ async function runSubagent(
 				sessionFile: singleResult.sessionFile,
 				intercomTarget: singleResult.intercomTarget,
 				model: singleResult.model,
+				modelRouting: singleResult.modelRouting,
 				attemptedModels: singleResult.attemptedModels,
 				modelAttempts: singleResult.modelAttempts,
 				totalCost: singleResult.totalCost,
@@ -4822,6 +4870,7 @@ async function runSubagent(
 				sessionFile: r.sessionFile,
 				intercomTarget: r.intercomTarget,
 				model: r.model,
+				modelRouting: r.modelRouting,
 				attemptedModels: r.attemptedModels,
 				modelAttempts: r.modelAttempts,
 				totalCost: r.totalCost,

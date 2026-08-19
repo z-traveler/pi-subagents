@@ -35,6 +35,7 @@ export interface SubagentDelegationRequest {
 	context: "fresh" | "fork";
 	cwd: string;
 	model?: string;
+	modelClass?: string;
 	thinking?: SubagentDelegationThinking;
 	timeoutMs?: number;
 	turnBudget?: SubagentDelegationTurnBudget;

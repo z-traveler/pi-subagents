@@ -38,6 +38,7 @@ import {
 	PI_INTERCOM_STABLE_ID_ENV,
 	PI_INTERCOM_SESSION_ID_ENV,
 	applyThinkingSuffix,
+	applyThinkingToModelCandidates,
 	buildPiArgs,
 	projectLaunchResolvedChildExtensions,
 	resolvePiLaunchToolPlan,
@@ -449,6 +450,7 @@ describe("buildPiArgs model wiring", () => {
 		const once = applyThinkingSuffix(model, false);
 		assert.equal(once, model);
 		assert.equal(applyThinkingSuffix(once, false), model);
+		assert.equal(applyThinkingSuffix("openai/gpt-5:high", false, true), "openai/gpt-5");
 
 		const { args } = buildPiArgs({
 			baseArgs: ["-p"],
@@ -463,6 +465,29 @@ describe("buildPiArgs model wiring", () => {
 		assert.ok(args.includes("--model"));
 		assert.ok(args.includes(model));
 		assert.ok(!args.some((arg) => arg.includes(":false")));
+	});
+
+	it("rejects thinking overrides that collapse distinct candidates", () => {
+		assert.throws(
+			() => applyThinkingToModelCandidates(
+				["openai/gpt-5:high", "openai/gpt-5:low"],
+				false,
+				true,
+				"smart",
+			),
+			/model class 'smart'.*gpt-5:high.*gpt-5:low.*same effective model 'openai\/gpt-5'/,
+		);
+	});
+
+	it("preserves legacy concrete fallback collisions when no model class is active", () => {
+		assert.deepEqual(
+			applyThinkingToModelCandidates(
+				["openai/gpt-5:high", "openai/gpt-5:low"],
+				false,
+				true,
+			),
+			["openai/gpt-5", "openai/gpt-5"],
+		);
 	});
 
 	it("leaves provider-specific model suffixes untouched when thinking is disabled", () => {

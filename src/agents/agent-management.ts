@@ -33,6 +33,7 @@ import { toModelInfo } from "../shared/model-info.ts";
 import { resolveSubagentModelOverride, type ParentModel } from "../runs/shared/model-fallback.ts";
 import { validateToolBudgetConfig } from "../runs/shared/tool-budget.ts";
 import { resolveTurnBudgetConfig } from "../runs/shared/turn-budget.ts";
+import { parseModelClass } from "../shared/model-routing.ts";
 import { validateAcceptanceInput } from "../runs/shared/acceptance.ts";
 import type { AcceptanceInput, Details, ExtensionConfig, ToolBudgetConfig } from "../shared/types.ts";
 import { getProjectConfigDir } from "../shared/utils.ts";
@@ -219,6 +220,8 @@ export function editableAgentConfig(agent: AgentConfig): AgentConfig {
 	const base = agent.override?.base;
 	const {
 		override: _override,
+		modelClass: _modelClass,
+		modelClassSource: _modelClassSource,
 		model: _model,
 		fallbackModels: _fallbackModels,
 		thinking: _thinking,
@@ -246,6 +249,7 @@ export function editableAgentConfig(agent: AgentConfig): AgentConfig {
 
 	return {
 		...editable,
+		...(base.modelClass !== undefined ? { modelClass: base.modelClass } : {}),
 		...(base.model !== undefined ? { model: base.model } : {}),
 		...(base.fallbackModels !== undefined ? { fallbackModels: [...base.fallbackModels] } : {}),
 		...(base.thinking !== undefined ? { thinking: base.thinking } : {}),
@@ -288,6 +292,7 @@ export function preservedAgentFrontmatterFields(agent: AgentConfig, cfg: Record<
 	if (hasKey(cfg, "systemPrompt")) changed("systemPrompt");
 	if (hasKey(cfg, "runner")) changed("runner");
 	if (hasKey(cfg, "model")) changed("model");
+	if (hasKey(cfg, "modelClass")) changed("modelClass");
 	if (hasKey(cfg, "fallbackModels")) changed("fallbackModels");
 	if (hasKey(cfg, "tools")) changed("tools");
 	if (hasKey(cfg, "skills")) changed("skill", "skills");
@@ -446,6 +451,19 @@ function applyAgentConfig(target: AgentConfig, cfg: Record<string, unknown>): st
 			if (model) target.model = model;
 			else delete target.model;
 		} else return "config.model must be a string or false when provided.";
+	}
+	if (hasKey(cfg, "modelClass")) {
+		if (cfg.modelClass === false || cfg.modelClass === "") {
+			delete target.modelClass;
+			delete target.modelClassSource;
+		} else {
+			try {
+				target.modelClass = parseModelClass(cfg.modelClass, "config.modelClass");
+				target.modelClassSource = "frontmatter";
+			} catch (error) {
+				return error instanceof Error ? error.message : String(error);
+			}
+		}
 	}
 	if (hasKey(cfg, "fallbackModels")) {
 		if (cfg.fallbackModels === false || cfg.fallbackModels === "") delete target.fallbackModels;
@@ -670,6 +688,7 @@ function formatAgentDetail(agent: AgentConfig): string {
 		lines.push(`Package: ${agent.packageName}`);
 	}
 	if (agent.aliases?.length) lines.push(`Aliases: ${agent.aliases.join(", ")}`);
+	if (agent.modelClass) lines.push(`Model class: ${agent.modelClass}`);
 	if (agent.model) lines.push(`Model: ${agent.model}`);
 	if (agent.fallbackModels?.length) lines.push(`Fallback models: ${agent.fallbackModels.join(", ")}`);
 	if (tools.length) lines.push(`Tools: ${tools.join(", ")}`);
@@ -824,6 +843,12 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 			`  ${resolvedModel ?? "(unresolved)"}`,
 			`Source: ${formatModelSource(agent, currentModel)}`,
 		];
+		if (agent.modelClass) {
+			lines.push(`Model class: ${agent.modelClass}`);
+			lines.push(`Class pool: ${(discovered.modelPools?.[agent.modelClass] ?? []).join(" -> ") || "(unmapped; concrete fallback applies)"}`);
+			const poolSource = discovered.modelPoolSources?.[agent.modelClass];
+			if (poolSource) lines.push(`Class pool source: ${poolSource.scope} (${poolSource.path})`);
+		}
 		if (agent.override) {
 			lines.push("Override file:");
 			lines.push(`  ${agent.override.path}`);
@@ -859,6 +884,10 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 		const resolvedModel = resolveSubagentModelOverride(agent.model, currentModel, availableModels, preferredProvider);
 		const source = `${formatModelSource(agent, currentModel)}${agent.disabled ? "; disabled" : ""}`;
 		lines.push(name);
+		if (agent.modelClass) {
+			lines.push(`  modelClass: ${agent.modelClass}`);
+			lines.push(`  pool: ${(discovered.modelPools?.[agent.modelClass] ?? []).join(" -> ") || "(unmapped)"}`);
+		}
 		lines.push("  model:");
 		lines.push(`    ${resolvedModel ?? "(unresolved)"}`);
 		lines.push(`  source: ${source}`);
