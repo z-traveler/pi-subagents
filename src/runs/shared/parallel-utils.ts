@@ -38,6 +38,7 @@ export interface RunnerSubagentStep {
 	thinking?: string;
 	thinkingCeiling?: import("../../shared/model-info.ts").ThinkingLevel;
 	modelCandidates?: string[];
+	modelRouting?: import("../../shared/types.ts").ModelRoutingSnapshot;
 	/** The primary model is inherited from the parent session and should not be verified against the child-reported active registry model. */
 	skipPrimaryModelVerification?: boolean;
 	modelVerificationRegistry?: Array<{ provider: string; id: string; fullId: string; contextWindow?: number }>;

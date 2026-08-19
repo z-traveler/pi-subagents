@@ -112,7 +112,7 @@ import { buildTimeoutRecoverySummary, collectTrackedMutationEvidence, snapshotTr
 import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelStep, validateDynamicCollection } from "../shared/dynamic-fanout.ts";
 import { claimRunFanoutBatch, getRunFanoutBudgetSnapshot } from "../shared/run-fanout-budget.ts";
 import { nestedSummaryFromAsyncStatus, projectNestedEvents, resolveNestedAsyncDir, writeNestedEvent } from "../shared/nested-events.ts";
-import { formatModelAttemptNote, formatSubagentModelVerificationError, isContextOverflow, isRetryableModelFailureAttempt, recordRetryableModelFailure } from "../shared/model-fallback.ts";
+import { classifyModelFailure, classifyRetryEffects, formatModelAttemptNote, formatSubagentModelVerificationError, isContextOverflow, isRetryableModelFailureAttempt, recordRetryableModelFailure, selectModelFailover } from "../shared/model-fallback.ts";
 import { markProcessTerminalCandidateLeaseRelease, processTerminalPath, writeProcessTerminalCandidate, type ProcessTerminalCandidate } from "./process-terminal.ts";
 import { createSteeringStatus, recordSteeringRequest, steeringStatus, terminalSteeringNoticeState, unconsumedSteerReason, updateSteeringTarget } from "./steering.ts";
 import { PROMPT_REDACTED, detectSubagentError, extractTextFromContent, extractToolArgsPreview, formatEmptyTerminalAssistantResponseError, getFinalOutput, hasEmptyTerminalAssistantResponse, readStatus } from "../../shared/utils.ts";
@@ -272,6 +272,7 @@ interface StepResult {
 	sessionFile?: string;
 	intercomTarget?: string;
 	model?: string;
+	modelRouting?: import("../../shared/types.ts").ModelRoutingSnapshot;
 	thinking?: string;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
@@ -1166,6 +1167,8 @@ export async function runSingleStepInner(
 				inheritSkills: step.inheritSkills,
 				task: step.launchBindingTask ?? task,
 				modelCandidates: candidates as string[],
+				...(step.modelRouting?.modelClass ? { modelClass: step.modelRouting.modelClass } : {}),
+				...(step.modelRouting?.poolDigest ? { modelPoolDigest: step.modelRouting.poolDigest } : {}),
 				fast: step.fast,
 				thinking: resolveEffectiveThinking(candidate, step.thinking),
 				systemPrompt: step.systemPrompt ?? "",
@@ -1181,6 +1184,8 @@ export async function runSingleStepInner(
 		// Each attempt rewrites the step output log; synchronous appends keep a
 		// retried attempt from interleaving with the previous attempt's flush.
 		fs.writeFileSync(ctx.outputFile, "", "utf-8");
+		const attemptRecentTools: Array<{ tool: string; args: string; endMs: number }> = [];
+		const attemptStartedAt = Date.now();
 		const run = await runChildSession(omitUndefinedProperties({
 			factory: ctx.childSessions,
 			launch,
@@ -1207,7 +1212,12 @@ export async function runSingleStepInner(
 			registerWatchdogStatus: (sink) => { watchdogSink = sink; },
 			timeoutMessage: ctx.timeoutMessage,
 			stopMessage: ctx.stopMessage,
-			onChildEvent: ctx.onChildEvent,
+			onChildEvent: (event: ChildEvent) => {
+				if (event.type === "tool_execution_start" && event.toolName) {
+					attemptRecentTools.push({ tool: event.toolName, args: JSON.stringify(event.args ?? {}), endMs: Date.now() - attemptStartedAt });
+				}
+				ctx.onChildEvent?.(event);
+			},
 			transcriptWriter,
 			toolTimeoutMs: ctx.toolTimeoutMs,
 			runDeadlineAt: ctx.deadlineAt,
@@ -1450,6 +1460,42 @@ export async function runSingleStepInner(
 			attemptNotes.push(`[fallback] ${attempt.model} failed: context overflow — the input exceeds this model's context window. Reduce the task input or use a model with a larger context window.`);
 			break modelAttemptsLoop;
 		}
+		if (step.modelRouting) {
+			const failureCategory = classifyModelFailure({
+				error,
+				timedOut: run.timedOut,
+				stopped: run.stopped,
+				interrupted: run.interrupted,
+				toolBudgetExceeded: toolBudgetBlocked,
+				structuredOutputFailed: structuredError !== undefined,
+			});
+			const effects = classifyRetryEffects({
+				toolCount: run.toolCount,
+				recentTools: attemptRecentTools,
+				fileMutationAttempted: run.observedMutationAttempt,
+			});
+			attempt.failureCategory = failureCategory;
+			attempt.effects = effects;
+			const selection = selectModelFailover({ category: failureCategory, currentModel: candidate, candidates: candidates as string[], currentIndex: modelIndex, effects });
+			attempt.failureDomain = selection.failureDomain;
+			attempt.skippedModels = selection.skippedModels.length > 0 ? selection.skippedModels : undefined;
+			if (!selection.decision.retry) {
+				attempt.retryBlockedReason = selection.decision.reason;
+				attempt.failoverReason = selection.decision.reason;
+				break modelAttemptsLoop;
+			}
+			const nextIndex = selection.nextIndex!;
+			const nextModel = candidates[nextIndex];
+			attempt.retryMode = selection.decision.mode;
+			attempt.nextModel = nextModel;
+			attempt.failoverReason = `${failureCategory}:${selection.decision.mode}`;
+			attemptNotes.push(formatModelAttemptNote(attempt, nextModel));
+			if (selection.decision.mode === "resume") {
+				nextAttemptTask = `${task}\n\n[Model failover continuation]\nA previous same-class model attempt changed the workspace before failing. Inspect the existing session and workspace state, continue from that state, and do not repeat completed external actions.`;
+			}
+			modelIndex = nextIndex;
+			continue;
+		}
 		if (!retryableModelFailure || modelIndex === candidates.length - 1) break modelAttemptsLoop;
 		attemptNotes.push(formatModelAttemptNote(attempt, candidates[modelIndex + 1]));
 		modelIndex += 1;
@@ -1574,6 +1620,7 @@ export async function runSingleStepInner(
 				task: PROMPT_REDACTED,
 				exitCode: effectiveFinalExitCode,
 				model: finalResult?.model,
+				modelRouting: step.modelRouting,
 				attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 				modelAttempts,
 				usage,
@@ -1604,6 +1651,7 @@ export async function runSingleStepInner(
 		sessionFile: step.sessionFile,
 		intercomTarget: ctx.childIntercomTarget,
 		model: finalResult?.model,
+		modelRouting: step.modelRouting ? { ...step.modelRouting, candidates: [...candidates].filter((candidate): candidate is string => Boolean(candidate)) } : undefined,
 		thinking: resolveEffectiveThinking(finalResult?.model, step.thinking),
 		attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 		modelAttempts,
@@ -2007,6 +2055,7 @@ export async function runSubagent(
 					...(transcriptPath ? { transcriptPath } : {}),
 					skills: task.skills,
 					model: task.model,
+					modelRouting: task.modelRouting,
 					...(task.contextLimit !== undefined ? { contextLimit: task.contextLimit } : {}),
 					thinking: task.thinking,
 					attemptedModels: task.modelCandidates && task.modelCandidates.length > 0 ? task.modelCandidates : task.model ? [task.model] : undefined,
@@ -2026,6 +2075,7 @@ export async function runSubagent(
 				outputName: step.collect.as,
 				structured: Boolean(step.collect.outputSchema),
 				...(step.parallel.contextLimit !== undefined ? { contextLimit: step.parallel.contextLimit } : {}),
+				...(step.parallel.modelRouting ? { modelRouting: step.parallel.modelRouting } : {}),
 				...(step.agentContract ? { agentContract: step.agentContract } : {}),
 				...(step.capabilityCeiling ? { capabilityCeiling: step.capabilityCeiling } : {}),
 				...(step.thinkingCeiling ? { thinkingCeiling: step.thinkingCeiling } : {}),
@@ -2061,6 +2111,7 @@ export async function runSubagent(
 				...(transcriptPath ? { transcriptPath } : {}),
 				skills: step.skills,
 				model: step.model,
+				modelRouting: step.modelRouting,
 				...(step.contextLimit !== undefined ? { contextLimit: step.contextLimit } : {}),
 				thinking: step.thinking,
 				attemptedModels: step.modelCandidates && step.modelCandidates.length > 0 ? step.modelCandidates : step.model ? [step.model] : undefined,
@@ -2289,6 +2340,7 @@ export async function runSubagent(
 				success: statusResultSuccess(state, step),
 				sessionFile: step.sessionFile,
 				model: step.model,
+				modelRouting: step.modelRouting,
 				thinking: step.thinking,
 				attemptedModels: step.attemptedModels,
 				modelAttempts: step.modelAttempts,
@@ -3801,6 +3853,7 @@ export async function runSubagent(
 					sessionFile: pr.sessionFile,
 					intercomTarget: pr.intercomTarget,
 					model: pr.model,
+					modelRouting: pr.modelRouting,
 					thinking: pr.thinking,
 					attemptedModels: pr.attemptedModels,
 					modelAttempts: pr.modelAttempts,
@@ -4260,6 +4313,7 @@ export async function runSubagent(
 						sessionFile: pr.sessionFile,
 						intercomTarget: pr.intercomTarget,
 						model: pr.model,
+						modelRouting: pr.modelRouting,
 						thinking: pr.thinking,
 						attemptedModels: pr.attemptedModels,
 						modelAttempts: pr.modelAttempts,
@@ -4555,6 +4609,7 @@ export async function runSubagent(
 				sessionFile: singleResult.sessionFile,
 				intercomTarget: singleResult.intercomTarget,
 				model: singleResult.model,
+				modelRouting: singleResult.modelRouting,
 				thinking: singleResult.thinking,
 				attemptedModels: singleResult.attemptedModels,
 				modelAttempts: singleResult.modelAttempts,
@@ -4930,6 +4985,7 @@ export async function runSubagent(
 				sessionFile: r.sessionFile,
 				intercomTarget: r.intercomTarget,
 				model: r.model,
+				modelRouting: r.modelRouting,
 				thinking: r.thinking,
 				attemptedModels: r.attemptedModels,
 				modelAttempts: r.modelAttempts,

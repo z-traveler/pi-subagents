@@ -428,7 +428,25 @@ describe("async status helpers", () => {
 					{ agent: "reviewer", status: "running", model: "openai-codex/gpt-5.5:high" },
 					{ agent: "scout", status: "running", model: "anthropic/claude-haiku-4-5", thinking: "low" },
 					{ agent: "local", status: "running", model: "ollama/qwen2.5-coder:7b" },
-					{ agent: "fallback", status: "running", model: "anthropic/claude-sonnet-4-5:low", thinking: "high" },
+					{
+						agent: "fallback",
+						status: "running",
+						model: "anthropic/claude-sonnet-4-5:low",
+						thinking: "high",
+						modelRouting: {
+							modelClass: "smart",
+							source: "per-run",
+							poolDigest: "digest",
+							candidates: ["openai/gpt-5.5:high", "anthropic/claude-sonnet-4-5:low"],
+						},
+						attemptedModels: ["openai/gpt-5.5:high", "anthropic/claude-sonnet-4-5:low"],
+						modelAttempts: [{
+							model: "openai/gpt-5.5:high",
+							success: false,
+							failureCategory: "transient",
+							failoverReason: "transient:restart",
+						}],
+					},
 				],
 			});
 
@@ -436,7 +454,7 @@ describe("async status helpers", () => {
 			assert.match(text, /1\. reviewer \| running \| gpt-5\.5 · thinking high/);
 			assert.match(text, /2\. scout \| running \| claude-haiku-4-5 · thinking low/);
 			assert.match(text, /3\. local \| running \| qwen2\.5-coder:7b(?! · thinking)/);
-			assert.match(text, /4\. fallback \| running \| claude-sonnet-4-5 · thinking low/);
+			assert.match(text, /4\. fallback \| running \| smart → claude-sonnet-4-5 · thinking low \(attempt 2\/2\) \[failure: transient; failover: transient:restart\]/);
 			assert.doesNotMatch(text, /openai-codex\/gpt-5\.5/);
 			assert.doesNotMatch(text, /gpt-5\.5:high/);
 		} finally {

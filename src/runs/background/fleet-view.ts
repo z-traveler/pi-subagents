@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { safeTerminalText, truncateDisplayText } from "../../shared/display-text.ts";
-import { formatDuration, formatModelThinking, formatTokens, shortenPath } from "../../shared/formatters.ts";
+import { formatDuration, formatTokens, shortenPath } from "../../shared/formatters.ts";
 import { formatActivityLabel } from "../../shared/status-format.ts";
 import {
 	DIRS,
@@ -17,7 +17,7 @@ import {
 import { readStatus } from "../../shared/utils.ts";
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
 import { contextModeLabel, summarizeContextModes } from "../shared/context-mode.ts";
-import { formatAsyncRunOutputPath, formatAsyncRunProgressLabel, listAsyncRuns, type AsyncRunSummary } from "./async-status.ts";
+import { formatAsyncRunOutputPath, formatAsyncRunProgressLabel, formatModelRoutingStatus, listAsyncRuns, type AsyncRunSummary } from "./async-status.ts";
 import { isTrustedRecordedSessionFile } from "../../shared/session-file-trust.ts";
 
 const DEFAULT_TRANSCRIPT_LINES = 80;
@@ -356,7 +356,7 @@ function formatAsyncFleetLines(runs: AsyncRunSummary[]): string[] {
 			const stepContext = contextModeLabel(step.context);
 			const phase = step.phase ? `[${step.phase}] ` : "";
 			const stepActivity = formatActivityFacts(step);
-			const modelThinking = formatModelThinking(step.model, step.thinking);
+			const modelThinking = formatModelRoutingStatus(step);
 			const parts = [`${step.index}. ${phase}${display}${stepContext ? ` ${stepContext}` : ""}`, step.status, stepActivity, modelThinking].filter(Boolean);
 			lines.push(`  ${parts.join(" | ")}`);
 			const output = path.join(run.asyncDir, `output-${step.index}.log`);
@@ -456,7 +456,7 @@ function selectTranscriptStep(status: AsyncStatus, options: TranscriptOptions): 
 
 function stepStateLine(mode: SubagentRunMode, index: number | undefined, step: AsyncJobStep | undefined): string | undefined {
 	if (index === undefined || !step) return undefined;
-	const modelThinking = formatModelThinking(step.model, step.thinking);
+	const modelThinking = formatModelRoutingStatus(step);
 	const context = contextModeLabel(step.context);
 	const parts = [
 		`${mode === "parallel" ? "Agent" : "Step"}: ${index} (${fleetChildDisplayName(step)})${context ? ` ${context}` : ""}`,

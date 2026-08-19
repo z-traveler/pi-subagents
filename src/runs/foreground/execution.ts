@@ -65,7 +65,7 @@ import { preflightLaunchCwd } from "../shared/launch-cwd.ts";
 import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
 import { createOrcaProgressTab, type OrcaProgressTab } from "../shared/orca-progress-tabs.ts";
 import { resolvePermissionRules } from "../shared/permissions.ts";
-import { applyThinkingSuffix, deriveForkPromptCacheKey } from "../shared/child-tool-plan.ts";
+import { applyThinkingSuffix, applyThinkingToModelCandidates, deriveForkPromptCacheKey } from "../shared/child-tool-plan.ts";
 import { deriveChildSessionName } from "../../shared/child-session-name.ts";
 import { assertAgentAllowedByCapabilityCeiling, intersectSubagentCapabilityCeilings, resolveCurrentSubagentCapabilityCeiling } from "../shared/capability-ceiling.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
@@ -77,11 +77,14 @@ import { buildTimeoutRecoverySummary, collectTrackedMutationEvidence, snapshotTr
 import { captureSingleOutputSnapshot, extractChildWrittenOutput, finalizeSingleOutput, formatSavedOutputReference, hasSingleOutputChangedSinceSnapshot, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
 	buildModelCandidates,
+	classifyModelFailure,
+	classifyRetryEffects,
 	formatSubagentModelVerificationError,
 	formatModelAttemptNote,
 	isContextOverflow,
 	isRetryableModelFailureAttempt,
 	recordRetryableModelFailure,
+	selectModelFailover,
 } from "../shared/model-fallback.ts";
 import {
 	createMutatingFailureState,
@@ -160,6 +163,7 @@ function persistSingleResultMetadata(input: {
 		processSignal: target.processSignal,
 		usage: target.usage,
 		model: target.model,
+		modelRouting: target.modelRouting,
 		attemptedModels: target.attemptedModels,
 		modelAttempts: target.modelAttempts,
 		durationMs: target.progressSummary?.durationMs,
@@ -266,6 +270,7 @@ function snapshotResult(result: SingleResult, progress: AgentProgress): SingleRe
 			? result.modelAttempts.map((attempt) => ({
 				...attempt,
 				usage: attempt.usage ? { ...attempt.usage } : undefined,
+				skippedModels: attempt.skippedModels ? [...attempt.skippedModels] : undefined,
 			}))
 			: undefined,
 		controlEvents: result.controlEvents ? result.controlEvents.map((event) => ({ ...event })) : undefined,
@@ -488,6 +493,8 @@ async function runSingleAttempt(
 		agent,
 		task: shared.originalTask ?? task,
 		modelCandidates: shared.modelCandidates ?? [],
+		...(options.modelRouting?.modelClass ? { modelClass: options.modelRouting.modelClass } : {}),
+		...(options.modelRouting?.poolDigest ? { modelPoolDigest: options.modelRouting.poolDigest } : {}),
 		...(fast !== undefined ? { fast } : {}),
 		...(resolvedThinking ? { thinking: resolvedThinking } : {}),
 		systemPrompt: effectiveSystemPrompt,
@@ -1804,7 +1811,7 @@ async function runSyncCompletionInner(
 	}
 	const systemPrompt = buildEffectiveSystemPrompt({ agent, resolvedSkills, cwd: skillCwd, ...(options.outputPath ? { outputPath: options.outputPath } : {}) });
 
-	const candidates = buildModelCandidates(
+	const configuredCandidates = options.modelCandidates ?? buildModelCandidates(
 		options.modelOverride ?? agent.model,
 		agent.fallbackModels,
 		options.availableModels,
@@ -1814,6 +1821,12 @@ async function runSyncCompletionInner(
 			primaryModelFromParent: options.modelOverrideFromParent,
 			origin: options.modelOrigin ?? (options.modelOverrideFromParent ? "inherited" : "configured"),
 		},
+	);
+	const candidates = applyThinkingToModelCandidates(
+		configuredCandidates,
+		options.thinkingOverride ?? agent.thinking,
+		options.thinkingOverride !== undefined,
+		options.modelRouting?.modelClass,
 	);
 	if (options.workflowChildPermitLaunch && candidates.length > 1) {
 		const error = "Workflow child permit does not support model fallback.";
@@ -1829,8 +1842,7 @@ async function runSyncCompletionInner(
 	}
 	try {
 		for (const candidate of candidates) {
-			const model = applyThinkingSuffix(candidate, options.thinkingOverride ?? agent.thinking, options.thinkingOverride !== undefined);
-			assertThinkingWithinCeiling({ model, configThinking: options.thinkingOverride ?? agent.thinking, ceiling: options.thinkingCeiling, agent: agent.name, runId: options.runId });
+			assertThinkingWithinCeiling({ model: candidate, configThinking: options.thinkingOverride ?? agent.thinking, ceiling: options.thinkingCeiling, agent: agent.name, runId: options.runId });
 		}
 	} catch (error) {
 		return redactResultPrompt(withRunContext({
@@ -1949,9 +1961,7 @@ async function runSyncCompletionInner(
 				artifactPaths: artifactPathsResult,
 				transcriptWriter,
 				attemptNotes,
-				modelCandidates: candidates
-					.map((modelCandidate) => applyThinkingSuffix(modelCandidate, options.thinkingOverride ?? agent.thinking, options.thinkingOverride !== undefined))
-					.filter((modelCandidate): modelCandidate is string => Boolean(modelCandidate)),
+				modelCandidates: candidates,
 				outputSnapshot,
 				originalTask: task,
 				orcaProgressTab,
@@ -2063,6 +2073,45 @@ async function runSyncCompletionInner(
 				attemptNotes.push(`[fallback] ${attempt.model} failed: context overflow — the input exceeds this model's context window. Reduce the task input or use a model with a larger context window.`);
 				break modelAttemptsLoop;
 			}
+			if (options.modelRouting) {
+				const failureCategory = classifyModelFailure({
+					error: result.error,
+					timedOut: result.timedOut,
+					stopped: result.stopped,
+					interrupted: result.interrupted,
+					detached: result.detached,
+					turnBudgetExceeded: result.turnBudgetExceeded,
+					toolBudgetExceeded: result.toolBudgetBlocked,
+					structuredOutputFailed: result.structuredOutputFailed,
+					acceptanceRejected: result.acceptance?.status === "rejected",
+				});
+				const effects = classifyRetryEffects({
+					toolCount: result.progressSummary?.toolCount,
+					recentTools: result.progressSummary?.recentTools,
+					fileMutationAttempted: result.effects?.fileMutation?.attempted,
+				});
+				attempt.failureCategory = failureCategory;
+				attempt.effects = effects;
+				const selection = selectModelFailover({ category: failureCategory, currentModel: candidate, candidates, currentIndex: modelIndex, effects });
+				attempt.failureDomain = selection.failureDomain;
+				attempt.skippedModels = selection.skippedModels.length > 0 ? selection.skippedModels : undefined;
+				if (!selection.decision.retry) {
+					attempt.retryBlockedReason = selection.decision.reason;
+					attempt.failoverReason = selection.decision.reason;
+					break modelAttemptsLoop;
+				}
+				const nextIndex = selection.nextIndex!;
+				const nextModel = candidates[nextIndex];
+				attempt.retryMode = selection.decision.mode;
+				attempt.nextModel = nextModel;
+				attempt.failoverReason = `${failureCategory}:${selection.decision.mode}`;
+				attemptNotes.push(formatModelAttemptNote(attempt, nextModel));
+				if (selection.decision.mode === "resume") {
+					nextAttemptTask = `${task}\n\n[Model failover continuation]\nA previous same-class model attempt changed the workspace before failing. Inspect the existing session and workspace state, continue from that state, and do not repeat completed external actions.`;
+				}
+				modelIndex = nextIndex - 1;
+				break;
+			}
 			if (!retryableModelFailure || modelIndex === modelsToTry.length - 1) break modelAttemptsLoop;
 			attemptNotes.push(formatModelAttemptNote(attempt, modelsToTry[modelIndex + 1]));
 			break;
@@ -2083,6 +2132,7 @@ async function runSyncCompletionInner(
 	result.usage = aggregateUsage;
 	result.attemptedModels = attemptedModels.length > 0 ? attemptedModels : undefined;
 	result.modelAttempts = modelAttempts.length > 0 ? modelAttempts : undefined;
+	result.modelRouting = options.modelRouting ? { ...options.modelRouting, candidates: [...candidates] } : undefined;
 	result.progressSummary = {
 		...(childSessionName ? { sessionName: childSessionName } : {}),
 		toolCount: totalToolCount,

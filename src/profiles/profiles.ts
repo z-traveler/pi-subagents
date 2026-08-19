@@ -6,6 +6,7 @@ import { BUILTIN_AGENT_NAMES } from "../agents/agents.ts";
 import { getPiSpawnCommand } from "../runs/shared/pi-spawn.ts";
 import { findModelInfo, getSupportedThinkingLevels, splitKnownThinkingSuffix, toModelInfo } from "../shared/model-info.ts";
 import { getAgentDir } from "../shared/utils.ts";
+import { parseModelClass, parseModelPools, type ModelPools } from "../shared/model-routing.ts";
 
 export const DEFAULT_PROVIDER_MODELS_MAX_AGE_DAYS = 7;
 
@@ -19,6 +20,7 @@ export type RecommendedRoleTier = "cheap" | "medium" | "strong";
 
 interface ProfileAgentOverride {
 	model?: string;
+	modelClass?: string;
 	thinking?: string | false;
 	fallbackModels?: string[] | false;
 }
@@ -26,6 +28,7 @@ interface ProfileAgentOverride {
 export interface SubagentProfileFile {
 	subagents: {
 		agentOverrides: Record<string, ProfileAgentOverride>;
+		modelPools?: ModelPools;
 		disableBuiltins?: boolean;
 		[key: string]: unknown;
 	};
@@ -81,6 +84,7 @@ export interface ProfileCheckResult {
 	filePath: string;
 	results: Array<{
 		agent: string;
+		modelClass?: string;
 		model: string;
 		inRegistry: boolean;
 		probe: { status: ProbeStatus; message?: string };
@@ -140,6 +144,10 @@ function validateSubagentProfile(filePath: string, parsed: Record<string, unknow
 		if (model !== undefined && typeof model !== "string") {
 			throw new Error(`Profile '${filePath}' has invalid model for '${name}'; expected a string.`);
 		}
+		if (override.modelClass !== undefined) parseModelClass(override.modelClass, `Profile '${filePath}' modelClass for '${name}'`);
+		if (override.model !== undefined && override.modelClass !== undefined) {
+			throw new Error(`Profile '${filePath}' override '${name}' cannot set both model and modelClass.`);
+		}
 		const thinking = override.thinking;
 		if (thinking !== undefined && thinking !== false && typeof thinking !== "string") {
 			throw new Error(`Profile '${filePath}' has invalid thinking for '${name}'; expected a string or false.`);
@@ -149,6 +157,7 @@ function validateSubagentProfile(filePath: string, parsed: Record<string, unknow
 			throw new Error(`Profile '${filePath}' has invalid fallbackModels for '${name}'; expected an array of strings or false.`);
 		}
 	}
+	parseModelPools((subagents as Record<string, unknown>).modelPools, filePath);
 	const disableBuiltins = (subagents as Record<string, unknown>).disableBuiltins;
 	if (disableBuiltins !== undefined && typeof disableBuiltins !== "boolean") {
 		throw new Error(`Profile '${filePath}' has invalid subagents.disableBuiltins; expected a boolean.`);
@@ -639,7 +648,10 @@ export async function checkSubagentProfile(
 	const availableModels = ctx.modelRegistry.getAvailable().map(toModelInfo);
 	const entries = Object.entries(profile.subagents.agentOverrides)
 		.filter(([, value]) => typeof value?.model === "string" && value.model.trim())
-		.map(([agent, value]) => ({ agent, model: value.model!.trim() }));
+		.map(([agent, value]) => ({ agent, model: value.model!.trim(), modelClass: undefined as string | undefined }));
+	for (const [modelClass, candidates] of Object.entries(profile.subagents.modelPools ?? {})) {
+		for (const model of candidates) entries.push({ agent: `modelPool:${modelClass}`, modelClass, model });
+	}
 	const probeCache = new Map<string, { status: ProbeStatus; message?: string }>();
 	const results: ProfileCheckResult["results"] = [];
 	for (const entry of entries) {
@@ -653,6 +665,7 @@ export async function checkSubagentProfile(
 		}
 		results.push({
 			agent: entry.agent,
+			...(entry.modelClass ? { modelClass: entry.modelClass } : {}),
 			model: entry.model,
 			inRegistry: modelInfo !== undefined,
 			probe,

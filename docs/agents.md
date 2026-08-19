@@ -215,7 +215,7 @@ You can override selected agent fields without copying the whole agent. Override
 }
 ```
 
-Supported override fields: `description`, `output`, `outputMode`, `defaultReads`, `model`, `defaultProvider`, `fallbackModels`, `thinking`, `systemPromptMode`, `inheritProjectContext`, `inheritGlobalContext`, `inheritSkills`, `defaultContext`, `acceptanceRole`, `disabled`, `skills`, `tools`, and `systemPrompt`.
+Supported override fields: `description`, `output`, `outputMode`, `defaultReads`, `modelClass`, `model`, `defaultProvider`, `fallbackModels`, `thinking`, `systemPromptMode`, `inheritProjectContext`, `inheritGlobalContext`, `inheritSkills`, `defaultContext`, `acceptanceRole`, `disabled`, `skills`, `tools`, and `systemPrompt`.
 
 - `description` replaces the discovered description for builtin and custom agents, which lets list output show deployment-specific routing or model metadata.
 - Use `output: false`, `defaultReads: false`, `defaultContext: false`, or `acceptanceRole: false` to clear an inherited value.
@@ -323,7 +323,8 @@ Field notes:
 | `extensions` | Omitted means a background child loads the parent's ambient extensions; empty means no ambient extensions; list values load exactly those extensions. Foreground children never load ambient extensions, so for them only listed values apply. |
 | `subagentOnlyExtensions` | Extension paths loaded only in this agent's child sessions. Tools registered there are unavailable to the main agent unless also installed through normal Pi extension configuration. |
 | `model` | Default model. Bare ids prefer the current provider when possible, then unique registry matches. |
-| `fallbackModels` | Ordered backup models for retryable provider/model failures before any tool activity. After tool work, only an eligible native foreground or background read-only HTTP 429 can continue once on a compatible same-configured-provider model, reopening the exact retained file with a fixed continuation prompt rather than replaying the task. This shares one recovery allowance with compaction-abort recovery and preserves the original deadline/cancellation. Ordinary task/deadline failures and external runners do not gain this exception. Requires the owned builtin `read`/`ls` profile without wait, coordination, custom tools or configured tool budgets. Foreground denies any configured usage budget; background permits only an authoritative remaining token allowance, not cost or unknown coverage. Retained history alone is insufficient. See [supported configuration and compatibility limits](models.md#native-read-only-continuation-after-http-429). |
+| `modelClass` | Semantic named pool resolved from `subagents.modelPools`; may coexist with concrete frontmatter defaults for portability. |
+| `fallbackModels` | Legacy ordered concrete backups. Named class pools use the same failure classifier and effect-safety rules; the native read-only HTTP 429 continuation rules still apply. See [supported configuration and compatibility limits](models.md#native-read-only-continuation-after-http-429). |
 | `thinking` | Appended as a `:level` suffix at runtime unless a suffix is already present. |
 | `systemPromptMode` | `replace` by default; `append` keeps Pi's base prompt. |
 | `inheritProjectContext` | Keeps or strips inherited repository instruction blocks. |

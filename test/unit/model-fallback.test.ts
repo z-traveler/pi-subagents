@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import {
 	buildModelCandidates,
+	classifyModelFailure,
+	classifyRetryEffects,
+	decideModelFailover,
 	fuzzyResolveModel,
 	formatSubagentModelVerificationError,
 	isContextOverflow,
@@ -11,6 +14,8 @@ import {
 	recordRetryableModelFailure,
 	resolveEffectiveSubagentModel,
 	resolveModelCandidate,
+	resolveModelRouting,
+	selectModelFailover,
 	resolveSubagentModelOverride,
 } from "../../src/runs/shared/model-fallback.ts";
 import { clearExclusions, findModelExclusion, getExcludedCount, recordModelFailure } from "../../src/runs/shared/model-exclusions.ts";
@@ -545,6 +550,71 @@ describe("model fallback helpers", () => {
 		assert.equal(isRetryableModelFailureAttempt({ error: "APIConnectionError: Connection closed.", messages: [{ role: "assistant", errorMessage: "APIConnectionError: Connection closed." }], toolCount: 0 }), true);
 		assert.equal(isRetryableModelFailureAttempt({ error: "APIConnectionError: Connection closed.", messages: [], toolCount: 0 }), true);
 		assert.equal(isRetryableModelFailureAttempt({ error: "APIConnectionError: Connection closed.", messages: [{ role: "assistant", errorMessage: "APIConnectionError: Connection closed." }], toolCount: 1 }), false);
+	});
+
+	it("lets structured control and contract facts override retryable error text", () => {
+		assert.equal(classifyModelFailure({ error: "network timeout", timedOut: true }), "control");
+		assert.equal(classifyModelFailure({ error: "provider unavailable", toolBudgetExceeded: true }), "control");
+		assert.equal(classifyModelFailure({ error: "network error", protocolError: true }), "tool");
+		assert.equal(classifyModelFailure({ error: "503 service unavailable", structuredOutputFailed: true }), "tool");
+		assert.equal(classifyModelFailure({ error: "429", acceptanceRejected: true }), "tool");
+	});
+
+	it("classifies failures and restricts failure-domain retries to another provider", () => {
+		assert.equal(classifyModelFailure({ error: "authentication failed" }), "failure-domain");
+		assert.equal(classifyModelFailure({ error: "HTTP 401" }), "failure-domain");
+		assert.equal(classifyModelFailure({ error: "HTTP 403" }), "failure-domain");
+		assert.equal(classifyModelFailure({ error: "HTTP 408" }), "transient");
+		assert.equal(classifyModelFailure({ error: "HTTP 409" }), "transient");
+		assert.equal(classifyModelFailure({ error: "model disabled" }), "candidate-unavailable");
+		assert.equal(classifyModelFailure({ error: "context window exceeded" }), "context");
+		assert.equal(classifyModelFailure({ error: "content policy refusal" }), "policy");
+		assert.equal(classifyModelFailure({ error: "bash failed (exit 1): timeout" }), "tool");
+		assert.equal(classifyModelFailure({ error: "rate limit exceeded" }), "transient");
+		assert.equal(decideModelFailover({ category: "failure-domain", currentModel: "openai/a", nextModel: "openai/b", effects: "none" }).retry, false);
+		assert.equal(decideModelFailover({ category: "failure-domain", currentModel: "openai/a", nextModel: "anthropic/b", effects: "none" }).retry, true);
+	});
+
+	it("records skipped same-domain candidates during failure-domain selection", () => {
+		const selected = selectModelFailover({ category: "failure-domain", currentModel: "provider/first", candidates: ["provider/first", "provider/second", "other/third"], currentIndex: 0, effects: "none" });
+		assert.deepEqual(selected.skippedModels, ["provider/second"]);
+		assert.equal(selected.nextIndex, 2);
+		assert.deepEqual(selected.decision, { retry: true, mode: "restart" });
+		assert.equal(selected.failureDomain, "provider");
+
+		const exhausted = selectModelFailover({ category: "failure-domain", currentModel: "provider/first", candidates: ["provider/first", "provider/second"], currentIndex: 0, effects: "none" });
+		assert.deepEqual(exhausted.skippedModels, ["provider/second"]);
+		assert.deepEqual(exhausted.decision, { retry: false, reason: "no-candidate" });
+	});
+
+	it("blocks failover after external effects and resumes workspace effects", () => {
+		assert.equal(classifyRetryEffects({ toolCount: 0 }), "none");
+		assert.equal(classifyRetryEffects({ toolCount: 1, recentTools: [{ tool: "edit", args: "{}", endMs: 1 }] }), "workspace");
+		assert.equal(classifyRetryEffects({ toolCount: 1, recentTools: [{ tool: "bash", args: JSON.stringify({ command: "printf x > local.txt" }), endMs: 1 }] }), "workspace");
+		assert.equal(classifyRetryEffects({ toolCount: 1, recentTools: [{ tool: "bash", args: "git commit -am local", endMs: 1 }] }), "workspace");
+		for (const command of [
+			"git push origin main",
+			"touch local.txt && docker push example/image",
+			"touch local.txt && kubectl apply -f deploy.yaml",
+			"touch local.txt && unknown-command",
+			'touch local.txt && echo "$(docker push example/image)"',
+			'touch local.txt && echo "it\'s $(docker push example/image)"',
+			"touch local.txt && echo `unknown-command`",
+		]) {
+			assert.equal(classifyRetryEffects({ toolCount: 1, recentTools: [{ tool: "bash", args: JSON.stringify({ command }), endMs: 1 }] }), "external-or-unknown");
+		}
+		assert.equal(classifyRetryEffects({ toolCount: 1, recentTools: [{ tool: "intercom", args: "{}", endMs: 1 }] }), "external-or-unknown");
+		assert.deepEqual(decideModelFailover({ category: "transient", currentModel: "openai/a", nextModel: "openai/b", effects: "workspace" }), { retry: true, mode: "resume" });
+		assert.equal(decideModelFailover({ category: "transient", currentModel: "openai/a", nextModel: "openai/b", effects: "external-or-unknown" }).retry, false);
+	});
+
+	it("rejects every out-of-scope model-class candidate before launch", () => {
+		assert.throws(() => resolveModelRouting({
+			explicitModelClass: "smart",
+			modelPools: { smart: ["other/primary", "allowed/fallback"] },
+			modelPoolSources: { smart: { scope: "project", path: "/repo/.pi/settings.json" } },
+			modelScope: { enforce: true, allow: ["allowed/*"] },
+		}), /smart.*project settings.*\/repo\/\.pi\/settings\.json.*other\/primary.*outside.*model scope/i);
 	});
 });
 

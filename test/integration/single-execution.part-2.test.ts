@@ -2709,6 +2709,121 @@ if (!fs.existsSync(${JSON.stringify(holdPath)})) { console.log('{}'); } else {
 		assert.equal(mockPi.callCount(), 2);
 	});
 
+	it("fails over within a frozen model class and preserves its routing metadata", async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "temporary provider failure" }],
+					model: "openai/gpt-5-mini",
+					errorMessage: "rate limit exceeded",
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 1,
+		});
+		mockPi.onCall({ output: "Recovered on same-class fallback" });
+		const candidates = ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"];
+		const routing = {
+			modelClass: "smart",
+			source: "agent-override" as const,
+			poolDigest: "frozen-pool-digest",
+			candidates,
+		};
+
+		const result = await runSync(tempDir, [makeAgent("echo")], "echo", "Task", {
+			runId: "model-class-fallback-sync",
+			modelCandidates: candidates,
+			modelRouting: routing,
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.model, "anthropic/claude-sonnet-4");
+		assert.deepEqual(result.modelRouting, routing);
+		assert.deepEqual(result.attemptedModels, candidates);
+		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("freezes thinking-adjusted model-class candidates in foreground routing metadata", async () => {
+		mockPi.onCall({ output: "Completed" });
+		const candidates = ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:medium"];
+
+		const result = await runSync(tempDir, [makeAgent("echo")], "echo", "Task", {
+			runId: "model-class-thinking-snapshot-sync",
+			modelCandidates: candidates,
+			modelRouting: {
+				modelClass: "smart",
+				source: "per-run",
+				poolDigest: "frozen-pool-digest",
+				candidates,
+			},
+			thinkingOverride: "low",
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.deepEqual(result.modelRouting?.candidates, ["openai/gpt-5-mini:low", "anthropic/claude-sonnet-4:low"]);
+	});
+
+	it("rejects thinking-collapsed model-class candidates without spawning a child", async () => {
+		const candidates = ["openai/gpt-5-mini:high", "openai/gpt-5-mini:low"];
+		await assert.rejects(
+			runSync(tempDir, [makeAgent("echo")], "echo", "Task", {
+				runId: "model-class-thinking-collision-sync",
+				modelCandidates: candidates,
+				modelRouting: {
+					modelClass: "smart",
+					source: "per-run",
+					poolDigest: "frozen-pool-digest",
+					candidates,
+				},
+				thinkingOverride: false,
+			}),
+			/Thinking override collapses model class 'smart'/,
+		);
+		assert.equal(mockPi.callCount(), 0);
+	});
+
+	it("skips same-provider candidates after a model-class failure-domain error", async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "provider quota failure" }],
+					model: "openai/gpt-5-mini",
+					errorMessage: "quota exceeded",
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 1,
+		});
+		mockPi.onCall({ output: "Recovered in another failure domain" });
+		const candidates = [
+			"openai/gpt-5-mini",
+			"openai/gpt-5",
+			"anthropic/claude-sonnet-4",
+		];
+
+		const result = await runSync(tempDir, [makeAgent("echo")], "echo", "Task", {
+			runId: "model-class-failure-domain-sync",
+			modelCandidates: candidates,
+			modelRouting: {
+				modelClass: "smart",
+				source: "per-run",
+				poolDigest: "frozen-pool-digest",
+				candidates,
+			},
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.model, "anthropic/claude-sonnet-4");
+		assert.deepEqual(result.attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
+		assert.deepEqual(result.modelAttempts?.[0]?.skippedModels, ["openai/gpt-5"]);
+		assert.equal(result.modelAttempts?.[0]?.failureDomain, "openai");
+		assert.equal(mockPi.callCount(), 2);
+	});
+
 	it("retries with fallback models when provider errors exit zero", async () => {
 		mockPi.onCall({
 			jsonl: [{

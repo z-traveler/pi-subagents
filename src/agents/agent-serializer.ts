@@ -12,6 +12,7 @@ export const KNOWN_FIELDS = new Set([
 	"tools",
 	"excludeTools",
 	"allowNestedSubagents",
+	"modelClass",
 	"model",
 	"fallbackModels",
 	"fast",
@@ -79,6 +80,7 @@ export function serializeAgent(config: AgentConfig, options: SerializeAgentOptio
 		lines.push(`allowNestedSubagents: ${config.allowNestedSubagents === undefined ? "" : config.allowNestedSubagents ? "true" : "false"}`);
 	}
 
+	if (config.modelClass || preserve("modelClass")) lines.push(`modelClass: ${config.modelClass ?? ""}`);
 	if (config.model || preserve("model")) lines.push(`model: ${config.model ?? ""}`);
 	const fallbackModelsValue = joinComma(config.fallbackModels);
 	if (fallbackModelsValue || preserve("fallbackModels")) lines.push(`fallbackModels: ${fallbackModelsValue ?? ""}`);
