@@ -4,9 +4,9 @@ import { fileURLToPath } from "node:url";
 import { discoverAgentSnapshot, findBlockingAgentDiagnostic, formatUnknownAgentError, resolveAgentName, unknownAgentDiagnosticContext, type AgentConfig, type AgentDiscoveryAllResult, type AgentScope, type AgentSource } from "../agents/agents.ts";
 import { resolveExecutionAgentScope } from "../agents/agent-scope.ts";
 import { normalizeSkillInput, resolveSkillsWithFallback } from "../agents/skills.ts";
-import { buildModelCandidates, inheritsParentModel, resolveEffectiveSubagentModel, resolveModelOrigin, type AvailableModelInfo, type ParentModel } from "../runs/shared/model-fallback.ts";
+import { resolveModelOrigin, resolveModelRouting, type AvailableModelInfo, type ModelClassSource, type ParentModel } from "../runs/shared/model-fallback.ts";
 import { resolveModelScopesForAgent } from "../runs/shared/model-scope.ts";
-import { applyThinkingSuffix, resolvePiLaunchToolPlan, type PiLaunchToolPlan } from "../runs/shared/child-tool-plan.ts";
+import { applyThinkingSuffix, applyThinkingToModelCandidates, resolvePiLaunchToolPlan, type PiLaunchToolPlan } from "../runs/shared/child-tool-plan.ts";
 import { buildEffectiveSystemPrompt } from "../runs/shared/effective-system-prompt.ts";
 import { normalizeSingleOutputOverride, resolveSingleOutputPath } from "../runs/shared/single-output.ts";
 import { getArtifactPaths, getArtifactsDir } from "../shared/artifacts.ts";
@@ -27,9 +27,9 @@ import { resultFilePath } from "../runs/background/result-files.ts";
 import { nestedResultsPath } from "../runs/shared/nested-events.ts";
 import { normalizeExtensionBindings, type ExtensionBindings } from "../runs/shared/extension-bindings.ts";
 
-// v3: the contract reports the resolved Intercom bridge state and binds its
-// prompt and tools into launchContractDigest, matching execution (#2127).
-export const SUBAGENT_LAUNCH_CONTRACT_VERSION = 3 as const;
+// v4: the contract freezes semantic model-class routing on top of the v3
+// Intercom bridge projection.
+export const SUBAGENT_LAUNCH_CONTRACT_VERSION = 4 as const;
 
 /** Stands in for the parent session target when the host does not supply one; only custom templates that name the session read it. */
 const PREFLIGHT_ORCHESTRATOR_TARGET = "preflight";
@@ -62,6 +62,7 @@ export interface SubagentLaunchContractInput {
 	agentScope?: AgentScope;
 	context?: "fresh" | "fork";
 	model?: string;
+	modelClass?: string;
 	fast?: boolean;
 	thinking?: string | false;
 	thinkingCeiling?: ThinkingLevel;
@@ -176,6 +177,9 @@ export interface SubagentLaunchContract {
 	context: "fresh" | "fork";
 	model?: string;
 	modelCandidates: string[];
+	requestedModelClass?: string;
+	modelClassSource?: ModelClassSource;
+	modelPoolDigest?: string;
 	thinking?: string;
 	thinkingCeiling?: ThinkingLevel;
 	systemPromptMode: AgentConfig["systemPromptMode"];
@@ -345,6 +349,7 @@ export async function resolveSubagentLaunchContract(input: SubagentLaunchContrac
 		...(input.outputMode !== undefined ? { outputMode: input.outputMode } : {}),
 		...(skillInput !== undefined ? { skills: skillInput } : {}),
 		...(input.model !== undefined ? { model: input.model } : {}),
+		...(input.modelClass !== undefined ? { modelClass: input.modelClass } : {}),
 	});
 	const requestedSkills = behavior.skills === false ? [] : behavior.skills;
 	const resolvedSkills = resolveSkillsWithFallback(
@@ -360,16 +365,29 @@ export async function resolveSubagentLaunchContract(input: SubagentLaunchContrac
 	if (resolvedSkills.missing.length > 0) diagnostics.push({ code: "missing_skill", severity: "error", message: `Missing skills: ${resolvedSkills.missing.join(", ")}` });
 
 	const externalRunner = agent.runner?.type === "external-cli" || agent.runner?.type === "external-job";
+	if (externalRunner && (input.modelClass !== undefined || agent.modelClass !== undefined)) {
+		return { ok: false, code: "unsupported_mode", message: `Agent '${agent.name}' uses runner.type='${agent.runner!.type}' and does not support modelClass routing.`, diagnostics };
+	}
 	const availableModels = normalizeAvailableModels(input.availableModels);
 	const preferredProvider = agent.modelProvider ?? input.preferredProvider ?? input.parentModel?.provider;
 	const modelScopes = resolveModelScopesForAgent(discovered.modelScope, agent.name, input.parentModel);
 	const modelOrigin = resolveModelOrigin({ explicitModel: input.model, agentModel: agent.model, parentModel: input.parentModel });
-	const primaryModel = externalRunner
-		? undefined
-		: resolveEffectiveSubagentModel(input.model, agent.model, input.parentModel, availableModels, preferredProvider, {
-			scope: modelScopes,
-			source: modelOrigin === "explicit" ? "explicit" : "inherited",
-		});
+	const routing = externalRunner ? { primaryModel: undefined, modelCandidates: [] } : resolveModelRouting({
+		explicitModel: input.model,
+		explicitModelClass: input.modelClass,
+		agentModel: agent.model,
+		agentFallbackModels: agent.fallbackModels,
+		agentModelClass: agent.modelClass,
+		agentModelClassSource: agent.modelClassSource === "agent-override" ? "agent-override" : "agent-frontmatter",
+		modelPools: discovered.modelPools,
+		modelPoolSources: discovered.modelPoolSources,
+		parentModel: input.parentModel,
+		availableModels,
+		preferredProvider,
+		modelScope: modelScopes,
+		modelOrigin,
+	});
+	const primaryModel = routing.primaryModel;
 	const effectiveThinkingConfig = input.thinking !== undefined ? input.thinking : agent.thinking;
 	const thinkingCeiling = externalRunner ? undefined : intersectThinkingCeilings(
 		discovered.maxThinking,
@@ -379,12 +397,7 @@ export async function resolveSubagentLaunchContract(input: SubagentLaunchContrac
 	const model = externalRunner ? undefined : applyThinkingSuffix(primaryModel, effectiveThinkingConfig, input.thinking !== undefined);
 	const modelCandidates = externalRunner
 		? []
-		: buildModelCandidates(primaryModel, agent.fallbackModels, availableModels, preferredProvider, {
-			scope: modelScopes,
-			primaryModelFromParent: modelOrigin === "inherited" || inheritsParentModel(input.model, agent.model, input.parentModel),
-			origin: modelOrigin,
-		})
-			.map((candidate) => applyThinkingSuffix(candidate, effectiveThinkingConfig, input.thinking !== undefined) ?? candidate);
+		: applyThinkingToModelCandidates(routing.modelCandidates, effectiveThinkingConfig, input.thinking !== undefined, routing.requestedModelClass);
 	if (!externalRunner) {
 		try {
 			assertThinkingWithinCeiling({ model, configThinking: effectiveThinkingConfig, ceiling: thinkingCeiling, agent: agent.name, runId });
@@ -449,6 +462,8 @@ export async function resolveSubagentLaunchContract(input: SubagentLaunchContrac
 		agent,
 		task: input.task ?? "",
 		modelCandidates,
+		...(routing.requestedModelClass ? { modelClass: routing.requestedModelClass } : {}),
+		...(routing.modelPoolDigest ? { modelPoolDigest: routing.modelPoolDigest } : {}),
 		...(fast !== undefined ? { fast } : {}),
 		...(effectiveThinking ? { thinking: effectiveThinking } : {}),
 		systemPrompt: buildEffectiveSystemPrompt({ agent, resolvedSkills: resolvedSkills.resolved, cwd: effectiveCwd, ...(outputPath ? { outputPath } : {}) }),
@@ -477,6 +492,9 @@ export async function resolveSubagentLaunchContract(input: SubagentLaunchContrac
 		context,
 		...(model ? { model } : {}),
 		modelCandidates,
+		...(routing.requestedModelClass ? { requestedModelClass: routing.requestedModelClass } : {}),
+		...(routing.modelClassSource ? { modelClassSource: routing.modelClassSource } : {}),
+		...(routing.modelPoolDigest ? { modelPoolDigest: routing.modelPoolDigest } : {}),
 		...(effectiveThinking ? { thinking: effectiveThinking } : {}),
 		...(thinkingCeiling ? { thinkingCeiling } : {}),
 		systemPromptMode: agent.systemPromptMode,

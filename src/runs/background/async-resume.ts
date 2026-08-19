@@ -37,6 +37,21 @@ export interface AsyncResumeOptions {
 	sessionId?: string;
 }
 
+export function resolveRecoveryModelCandidates(
+	sessionModel: string | undefined,
+	descriptor: SteeringRecoveryDescriptor | undefined,
+): string[] | undefined {
+	const frozen = descriptor?.modelRouting?.candidates
+		?? (descriptor?.model ? [descriptor.model, ...(descriptor.fallbackModels ?? [])] : []);
+	const current = sessionModel ?? descriptor?.model;
+	if (!current) return frozen.length > 0 ? [...frozen] : undefined;
+	const currentIndex = frozen.indexOf(current);
+	const remaining = currentIndex >= 0
+		? frozen.slice(currentIndex + 1)
+		: frozen.filter((candidate) => candidate !== current);
+	return [current, ...remaining];
+}
+
 export type AsyncResumeTarget = {
 	kind: "live" | "revive";
 	runId: string;
@@ -319,7 +334,7 @@ export function readAsyncRecoveryDescriptor(asyncDir: string | undefined): Steer
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': expected an object.`);
 	const parsed = value as Record<string, unknown>;
 	const allowedFields = new Set([
-		"modelResponseAliases", "version", "launchContractDigest", "sourceRunId", "agentContract", "agent", "sessionFile", "cwd", "model", "modelProvider", "modelOverrideFromParent", "modelOrigin", "fallbackModels", "fast", "thinking", "thinkingCeiling", "tools", "allowNestedSubagents", "extensions",
+		"modelResponseAliases", "version", "launchContractDigest", "sourceRunId", "agentContract", "agent", "sessionFile", "cwd", "model", "modelRouting", "modelProvider", "modelOverrideFromParent", "modelOrigin", "fallbackModels", "fast", "thinking", "thinkingCeiling", "tools", "allowNestedSubagents", "extensions",
 		"subagentOnlyExtensions", "mcpDirectTools", "excludeTools", "mutationTools", "systemPrompt", "systemPromptMode", "inheritProjectContext", "inheritGlobalContext", "inheritSkills", "skills",
 		"skillPath", "agentFilePath", "completionGuard", "memory", "outputPath", "outputMode", "structuredOutputSchema", "acceptance", "sessionDir", "artifactConfig",
 		"artifactsDir", "maxOutput", "controlConfig", "context", "intercomBridge", "absoluteDeadlineAt", "initialTurnBudget", "initialToolBudget", "maxSubagentDepth", "share", "capabilityCeiling",
@@ -333,7 +348,7 @@ export function readAsyncRecoveryDescriptor(asyncDir: string | undefined): Steer
 	for (const field of requiredStrings) {
 		if (typeof parsed[field] !== "string" || !(parsed[field] as string).trim()) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': ${field} must be a non-empty string.`);
 	}
-	if (parsed.version !== 1) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': version must be 1.`);
+	if (parsed.version !== 1 && parsed.version !== 2) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': version must be 1 or 2.`);
 	try {
 		parsed.runFanoutBudget = validateRunFanoutBudgetDescriptor(parsed.runFanoutBudget);
 	} catch (error) {
@@ -351,6 +366,13 @@ export function readAsyncRecoveryDescriptor(asyncDir: string | undefined): Steer
 	}
 	if (parsed.systemPromptMode !== "append" && parsed.systemPromptMode !== "replace") throw new Error(`Invalid async recovery descriptor '${descriptorPath}': systemPromptMode is invalid.`);
 	if (parsed.outputMode !== "inline" && parsed.outputMode !== "file-only") throw new Error(`Invalid async recovery descriptor '${descriptorPath}': outputMode is invalid.`);
+	if (parsed.modelRouting !== undefined) {
+		if (!parsed.modelRouting || typeof parsed.modelRouting !== "object" || Array.isArray(parsed.modelRouting)) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': modelRouting must be an object.`);
+		const routing = parsed.modelRouting as Record<string, unknown>;
+		if (Object.keys(routing).some((key) => !["modelClass", "source", "poolDigest", "candidates"].includes(key))) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': modelRouting contains unknown fields.`);
+		if (typeof routing.modelClass !== "string" || typeof routing.poolDigest !== "string" || !["per-run", "agent-override", "agent-frontmatter"].includes(String(routing.source))) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': modelRouting metadata is invalid.`);
+		if (!Array.isArray(routing.candidates) || routing.candidates.length === 0 || routing.candidates.some((entry) => typeof entry !== "string" || !entry.trim())) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': modelRouting.candidates must contain non-empty strings.`);
+	}
 	if (parsed.context !== undefined && parsed.context !== "fresh" && parsed.context !== "fork") throw new Error(`Invalid async recovery descriptor '${descriptorPath}': context is invalid.`);
 	if (parsed.modelOverrideFromParent !== undefined && typeof parsed.modelOverrideFromParent !== "boolean") throw new Error(`Invalid async recovery descriptor '${descriptorPath}': modelOverrideFromParent must be a boolean.`);
 	if (parsed.fast !== undefined && typeof parsed.fast !== "boolean") throw new Error(`Invalid async recovery descriptor '${descriptorPath}': fast must be a boolean.`);

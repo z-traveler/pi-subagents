@@ -76,6 +76,7 @@ describe("public launch contract preflight", () => {
 	});
 
 	it("resolves an ordinary single-agent contract without creating launch directories", async () => {
+		assert.equal(SUBAGENT_LAUNCH_CONTRACT_VERSION, 4);
 		const cwd = path.join(tempDir, "repo");
 		fs.mkdirSync(cwd, { recursive: true });
 		writeSkill(cwd, "project-skill");
@@ -116,7 +117,7 @@ Project prompt.
 			assert.equal(result.ok, true);
 			assert.equal(result.contract.version, SUBAGENT_LAUNCH_CONTRACT_VERSION);
 			assert.equal(result.contract.agent.source, "project");
-			assert.equal(result.contract.agent.definitionProjectionVersion, 1);
+			assert.equal(result.contract.agent.definitionProjectionVersion, 2);
 			assert.match(result.contract.agent.definitionDigest, /^[a-f0-9]{64}$/);
 			assert.match(result.contract.launchContractDigest, /^[a-f0-9]{64}$/);
 			assert.ok(result.contract.agent.shadowedCandidates.some((candidate) => candidate.name === "worker" && candidate.source === "builtin"));
@@ -157,6 +158,112 @@ Project prompt.
 		} finally {
 			handle.dispose();
 		}
+	});
+
+	it("resolves an agent modelClass to a frozen ordered model pool", async () => {
+		const cwd = path.join(tempDir, "repo-model-class");
+		fs.mkdirSync(cwd, { recursive: true });
+		writeJson(path.join(process.env.PI_CODING_AGENT_DIR!, "settings.json"), {
+			subagents: {
+				modelPools: {
+					smart: ["test/primary:high", "other/fallback:medium"],
+					wise: ["test/primary:high", "other/fallback:medium"],
+				},
+			},
+		});
+		writeAgent(path.join(cwd, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Project worker
+modelClass: smart
+model: test/portable-default
+thinking: low
+---
+Project prompt.
+`);
+
+		const result = await resolveSubagentLaunchContract({
+			agent: "worker",
+			cwd,
+			availableModels: [
+				{ provider: "test", id: "primary", fullId: "test/primary" },
+				{ provider: "test", id: "portable-default", fullId: "test/portable-default" },
+				{ provider: "other", id: "fallback", fullId: "other/fallback" },
+			],
+		});
+
+		assert.equal(result.ok, true);
+		if (!result.ok) return;
+		assert.equal(result.contract.requestedModelClass, "smart");
+		assert.equal(result.contract.modelClassSource, "agent-frontmatter");
+		assert.equal(result.contract.model, "test/primary:high");
+		assert.deepEqual(result.contract.modelCandidates, ["test/primary:high", "other/fallback:medium"]);
+		assert.match(result.contract.modelPoolDigest!, /^[a-f0-9]{64}$/);
+
+		const sameCandidatesFromDifferentClass = await resolveSubagentLaunchContract({
+			agent: "worker",
+			cwd,
+			modelClass: "wise",
+			availableModels: [
+				{ provider: "test", id: "primary", fullId: "test/primary" },
+				{ provider: "test", id: "portable-default", fullId: "test/portable-default" },
+				{ provider: "other", id: "fallback", fullId: "other/fallback" },
+			],
+		});
+		assert.equal(sameCandidatesFromDifferentClass.ok, true);
+		if (!sameCandidatesFromDifferentClass.ok) return;
+		assert.deepEqual(sameCandidatesFromDifferentClass.contract.modelCandidates, result.contract.modelCandidates);
+		assert.notEqual(sameCandidatesFromDifferentClass.contract.launchContractDigest, result.contract.launchContractDigest);
+	});
+
+	it("rejects a thinking override that collapses model-class candidates before launch", async () => {
+		const cwd = path.join(tempDir, "repo-model-class-thinking-collision");
+		fs.mkdirSync(cwd, { recursive: true });
+		writeJson(path.join(process.env.PI_CODING_AGENT_DIR!, "settings.json"), {
+			subagents: { modelPools: { smart: ["test/primary:high", "test/primary:low"] } },
+		});
+		writeAgent(path.join(cwd, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Project worker
+modelClass: smart
+---
+Project prompt.
+`);
+
+		await assert.rejects(
+			resolveSubagentLaunchContract({
+				agent: "worker",
+				cwd,
+				thinking: false,
+				availableModels: [{ provider: "test", id: "primary", fullId: "test/primary" }],
+			}),
+			/Thinking override collapses model class 'smart'.*same effective model 'test\/primary'/,
+		);
+	});
+
+	it("preserves legacy concrete-model fallback collisions after a thinking override", async () => {
+		const cwd = path.join(tempDir, "repo-legacy-thinking-collision");
+		fs.mkdirSync(cwd, { recursive: true });
+		writeAgent(path.join(cwd, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Project worker
+model: test/primary:high
+fallbackModels:
+  - test/primary:low
+---
+Project prompt.
+`);
+
+		const result = await resolveSubagentLaunchContract({
+			agent: "worker",
+			cwd,
+			thinking: false,
+			availableModels: [{ provider: "test", id: "primary", fullId: "test/primary" }],
+		});
+
+		assert.equal(result.ok, true);
+		if (!result.ok) return;
+		assert.equal(result.contract.requestedModelClass, undefined);
+		assert.deepEqual(result.contract.modelCandidates, ["test/primary", "test/primary"]);
 	});
 
 	it("projects concurrent children under distinct run-id roots for an explicit sessionDir", async () => {

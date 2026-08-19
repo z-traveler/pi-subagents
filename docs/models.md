@@ -5,13 +5,15 @@ How subagents pick models, and how to change that.
 Builtin agents inherit your current Pi default model. This keeps new installs from depending on a provider you may not have configured. From there you can layer defaults and overrides:
 
 - `subagents.defaultModel` — a default for every subagent that does not set its own model.
+- `subagents.modelPools.<class>` — an ordered pool behind a semantic class such as `fast`, `medium`, or `smart`.
 - `subagents.defaultProvider` — a provider preference for bare model ids, such as `llama-3`, when multiple providers expose the same id.
+- `subagents.agentOverrides.<name>.modelClass` — route one role through a named pool.
 - `subagents.agentOverrides.<name>.model` — pin one role.
 - `subagents.agentOverrides.<name>.defaultProvider` — choose or clear the provider preference for one role.
 - `subagents.agentOverridesByProvider.<provider>.<name>` — layer role fields for the active parent provider.
 - Per-run overrides — for one launch only.
 
-Precedence, strongest first: per-run override → provider-scoped role override → `agentOverrides.<name>.model` → agent frontmatter `model` → `subagents.defaultModel` → the parent session model. A provider preference does not replace this order; it only resolves bare model ids when the active registry has more than one match. Fully qualified `provider/model` strings still win exactly.
+Precedence, strongest first: per-run `model` or `modelClass` → provider-scoped role override → ordinary role override → mapped frontmatter `modelClass` → frontmatter `model` → `subagents.defaultModel` → the parent session model. One call or override object cannot set both `model` and `modelClass`; agent frontmatter may keep both so its concrete model remains a portable fallback when a deployment has no mapping for that frontmatter class. A provider preference does not replace this order; it only resolves bare model ids when the active registry has more than one match. Fully qualified `provider/model` strings still win exactly.
 
 Use `model: "inherit"` in agent frontmatter or `agentOverrides.<name>.model` to select the current parent session model explicitly.
 
@@ -83,6 +85,33 @@ For a persistent role override with a backup model for provider failures:
 
 `subagents.defaultModel` and `subagents.defaultProvider` apply to builtin, package, user, and project agents. `defaultModel` fills only agents that do not set `model` in frontmatter. `defaultProvider` is also applied to frontmatter and override models so bare ids resolve against the intended provider. Per-run model overrides and `agentOverrides.<name>.model` win over frontmatter and the global default. The same `agentOverrides` block can change `tools`, `skills`, inherited context, prompt text, or disable an agent (see [agents.md](agents.md)); matching custom-agent frontmatter is replaced for any field set by the override.
 
+## Named model classes and same-class failover
+
+Use lowercase kebab-case class names. Each pool is ordered; a project pool replaces the user pool with the same name as one unit rather than merging candidates.
+
+```json
+{
+  "subagents": {
+    "modelPools": {
+      "fast": ["deepseek/deepseek-v4-flash:off", "openai-codex/gpt-5.6-luna:off"],
+      "medium": ["openai-codex/gpt-5.6-terra:medium", "deepseek/deepseek-v4-pro:medium"],
+      "smart": ["openai-codex/gpt-5.6-sol:high", "anthropic/claude-fable-5:medium"]
+    },
+    "agentOverrides": {
+      "scout": { "modelClass": "fast" },
+      "worker": { "modelClass": "medium" },
+      "oracle": { "modelClass": "smart" }
+    }
+  }
+}
+```
+
+Per-run forms are `modelClass: "smart"` in structured calls/workflow children and `/run oracle[modelClass=smart] ...`. An explicit per-run or agent-override class must exist. An unmapped frontmatter class falls back to its concrete `model`/`fallbackModels`, then the normal defaults.
+
+The pool is resolved and frozen when the child launches. Status/results expose `modelRouting` with the class, source, pool digest, and candidates; retained resume uses that frozen candidate set even if settings later change.
+
+Failover stays inside the selected class. Transient/provider-unavailable failures may try the next candidate; auth, billing, and quota failures cross only to a different provider. Context-window, policy, tool, control, and unknown task failures do not fail over. A candidate is attempted at most once because Pi core already owns request-level retries. No-tool/read-only failures restart on the next candidate; workspace edits continue in the retained session; external or unknown effects block automatic failover to avoid duplicate side effects.
+
 ## Fast mode
 
 Set `fast: true` on a run, in agent frontmatter, or in `subagents.agentOverrides.<name>.fast` to request the OpenAI priority service tier for supported native OpenAI-Codex children. This can use a higher quota tier or cost more. It is off by default.
@@ -100,7 +129,7 @@ A setup that works well in practice: route agents by task shape instead of runni
 
 The routing rule: use the capability tiers (1–3) when the task is well-scoped, and the intent tier (4) when scoping or judging is the task itself.
 
-Give tier-4 agents `fallbackModels` for retryable provider/model failures such as rate-limit, overload, unavailable-model, and provider-reported timeout errors **before any tool activity**. After tool activity, failures remain terminal except for the narrow native read-only HTTP 429 continuation below; the task is never automatically replayed after tool work. Ordinary task failures and the outer run-level `timeoutMs` / `maxRuntimeMs` deadline do not trigger fallback.
+Give tier-4 agents a cross-provider `modelClass` pool (or legacy `fallbackModels`) so subscription usage limits degrade gracefully instead of failing the run. Legacy concrete fallback follows the retry and native read-only continuation rules below; named classes use the same-class effect-safety rules above. Ordinary task failures and the outer run-level `timeoutMs` / `maxRuntimeMs` deadline do not trigger fallback.
 
 Fallback uses native Pi sessions, not fresh `pi` CLI processes. Even when an exact session file is reopened, normal fallback resubmits the original task; retained history alone does not make automatic continuation after tool work safe.
 

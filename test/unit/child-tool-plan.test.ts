@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { getHostBuiltinToolNames, resolvePiLaunchToolPlan } from "../../src/runs/shared/child-tool-plan.ts";
+import { applyThinkingSuffix, applyThinkingToModelCandidates, getHostBuiltinToolNames, resolvePiLaunchToolPlan } from "../../src/runs/shared/child-tool-plan.ts";
 import { buildInProcessChildLaunch } from "../../src/runs/shared/child-launch.ts";
 import { MCP_RUNTIME_SNAPSHOT_EVENT, MCP_RUNTIME_SNAPSHOT_VERSION, type McpRuntimeSnapshotHost } from "../../src/runs/shared/mcp-direct-tool-allowlist.ts";
 
@@ -20,6 +20,35 @@ function runtimeSnapshotHost(serverName: string): McpRuntimeSnapshotHost {
 }
 
 describe("child tool plan", () => {
+	it("removes explicit thinking suffixes when a per-run override disables thinking", () => {
+		const model = "openai/gpt-5:high";
+		assert.equal(applyThinkingSuffix(model, false), model);
+		assert.equal(applyThinkingSuffix(model, false, true), "openai/gpt-5");
+	});
+
+	it("rejects thinking overrides that collapse distinct model-class candidates", () => {
+		assert.throws(
+			() => applyThinkingToModelCandidates(
+				["openai/gpt-5:high", "openai/gpt-5:low"],
+				false,
+				true,
+				"smart",
+			),
+			/model class 'smart'.*gpt-5:high.*gpt-5:low.*same effective model 'openai\/gpt-5'/,
+		);
+	});
+
+	it("preserves legacy concrete fallback collisions when no model class is active", () => {
+		assert.deepEqual(
+			applyThinkingToModelCandidates(
+				["openai/gpt-5:high", "openai/gpt-5:low"],
+				false,
+				true,
+			),
+			["openai/gpt-5", "openai/gpt-5"],
+		);
+	});
+
 	it("fails a launch that selects MCP tools from the adapter's runtime snapshot", () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-runtime-mcp-"));
 		try {

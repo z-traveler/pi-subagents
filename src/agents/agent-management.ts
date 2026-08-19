@@ -39,6 +39,7 @@ import { previewDisplayText } from "../shared/display-text.ts";
 import { capabilityCeilingAgentRestrictionSources, isAgentAllowedByCapabilityCeiling, resolveCurrentSubagentCapabilityCeiling } from "../runs/shared/capability-ceiling.ts";
 import { mergeRuntimeAgents, type RuntimeAgentOwner } from "./runtime-agent-registry.ts";
 import { listExternalJobProviders } from "../api/external-job-provider.ts";
+import { parseModelClass } from "../shared/model-routing.ts";
 
 type ManagementAction = "list" | "get" | "models" | "create" | "update" | "delete" | "eject" | "disable" | "enable" | "reset";
 type ManagementScope = "user" | "project";
@@ -257,6 +258,10 @@ export function editableAgentConfig(agent: AgentConfig): AgentConfig {
 	const withoutSettingsDefaults = (config: AgentConfig): AgentConfig => {
 		if (!frontmatterFields) return config;
 		const next = { ...config };
+		if (!hasDeclaredField("modelClass")) {
+			delete next.modelClass;
+			delete next.modelClassSource;
+		}
 		if (!hasDeclaredField("model")) delete next.model;
 		if (!hasDeclaredField("thinking")) delete next.thinking;
 		return next;
@@ -267,6 +272,8 @@ export function editableAgentConfig(agent: AgentConfig): AgentConfig {
 		output: _output,
 		outputMode: _outputMode,
 		defaultReads: _defaultReads,
+		modelClass: _modelClass,
+		modelClassSource: _modelClassSource,
 		model: _model,
 		fallbackModels: _fallbackModels,
 		fast: _fast,
@@ -304,6 +311,7 @@ export function editableAgentConfig(agent: AgentConfig): AgentConfig {
 		...(base.output !== undefined ? { output: base.output } : {}),
 		...(base.outputMode !== undefined ? { outputMode: base.outputMode } : {}),
 		...(base.defaultReads !== undefined ? { defaultReads: [...base.defaultReads] } : {}),
+		...(base.modelClass !== undefined && hasDeclaredField("modelClass") ? { modelClass: base.modelClass } : {}),
 		...(base.model !== undefined && hasDeclaredField("model") ? { model: base.model } : {}),
 		...(base.fallbackModels !== undefined ? { fallbackModels: [...base.fallbackModels] } : {}),
 		...(base.fast !== undefined ? { fast: base.fast } : {}),
@@ -352,6 +360,7 @@ export function preservedAgentFrontmatterFields(agent: AgentConfig, cfg: Record<
 	if (hasKey(cfg, "aliases")) changed("alias", "aliases");
 	if (hasKey(cfg, "systemPrompt")) changed("systemPrompt");
 	if (hasKey(cfg, "runner")) changed("runner");
+	if (hasKey(cfg, "modelClass")) changed("modelClass");
 	if (hasKey(cfg, "model")) changed("model");
 	if (hasKey(cfg, "fallbackModels")) changed("fallbackModels");
 	if (hasKey(cfg, "tools")) changed("tools");
@@ -465,6 +474,19 @@ function applyAgentConfig(target: AgentConfig, cfg: Record<string, unknown>): st
 			if (model) target.model = model;
 			else delete target.model;
 		} else return "config.model must be a string or false when provided.";
+	}
+	if (hasKey(cfg, "modelClass")) {
+		if (cfg.modelClass === false || cfg.modelClass === "") {
+			delete target.modelClass;
+			delete target.modelClassSource;
+		} else {
+			try {
+				target.modelClass = parseModelClass(cfg.modelClass, "config.modelClass");
+				target.modelClassSource = "frontmatter";
+			} catch (error) {
+				return error instanceof Error ? error.message : String(error);
+			}
+		}
 	}
 	if (hasKey(cfg, "fallbackModels")) {
 		if (cfg.fallbackModels === false || cfg.fallbackModels === "") delete target.fallbackModels;
@@ -913,6 +935,7 @@ function formatAgentDetail(agent: AgentConfig): string {
 		lines.push(`Package: ${agent.packageName}`);
 	}
 	if (agent.aliases?.length) lines.push(`Aliases: ${agent.aliases.join(", ")}`);
+	if (agent.modelClass) lines.push(`Model class: ${agent.modelClass}`);
 	if (agent.model) lines.push(`Model: ${agent.model}`);
 	if (agent.fallbackModels?.length) lines.push(`Fallback models: ${agent.fallbackModels.join(", ")}`);
 	if (tools.length) lines.push(`Tools: ${tools.join(", ")}`);
@@ -1056,6 +1079,12 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 			lines.push("Effective model:");
 			lines.push(`  ${resolvedModel ?? "(unresolved)"}`);
 			lines.push(`Source: ${source}`);
+			if (agent.modelClass) {
+				lines.push(`Model class: ${agent.modelClass}`);
+				lines.push(`Class pool: ${(discovered.modelPools?.[agent.modelClass] ?? []).join(" -> ") || "(unmapped; concrete fallback applies)"}`);
+				const poolSource = discovered.modelPoolSources?.[agent.modelClass];
+				if (poolSource) lines.push(`Class pool source: ${poolSource.scope} (${poolSource.path})`);
+			}
 			lines.push(`Thinking: ${effectiveThinking ?? "default"}`);
 			if (agent.fallbackModels?.length) {
 				lines.push("Fallback models:");
@@ -1078,6 +1107,10 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 			break;
 		}
 		lines.push(name);
+		if (agent.modelClass) {
+			lines.push(`  modelClass: ${agent.modelClass}`);
+			lines.push(`  pool: ${(discovered.modelPools?.[agent.modelClass] ?? []).join(" -> ") || "(unmapped)"}`);
+		}
 		lines.push("  model:");
 		lines.push(`    ${resolvedModel ?? "(unresolved)"}`);
 		lines.push(`  source: ${source}`);

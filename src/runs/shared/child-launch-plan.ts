@@ -11,6 +11,7 @@ export interface ResolvedStepBehavior {
 	progress: boolean;
 	skills: string[] | false;
 	model?: string;
+	modelClass?: string;
 	fast?: boolean;
 }
 
@@ -23,6 +24,7 @@ export interface StepOverrides {
 	progress?: boolean;
 	skills?: string[] | false;
 	model?: string;
+	modelClass?: string;
 	fast?: boolean;
 }
 
@@ -93,8 +95,9 @@ export function resolveStepBehavior(
 
 	const outputMode = stepOverrides.outputMode ?? agentConfig.outputMode ?? "inline";
 	const model = stepOverrides.model ?? agentConfig.model;
+	const modelClass = stepOverrides.modelClass ?? agentConfig.modelClass;
 	const fast = stepOverrides.fast ?? agentConfig.fast;
-	return { output, outputMode, reads, progress, skills, model, fast };
+	return { output, outputMode, reads, progress, skills, model, modelClass, fast };
 }
 
 export function resolveTaskTextForFileUpdatePolicy(task: string | undefined, originalTask?: string): string | undefined {

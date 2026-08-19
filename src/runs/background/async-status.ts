@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { formatDuration, formatModelThinking, formatTokens, shortenPath } from "../../shared/formatters.ts";
 import { previewDisplayText } from "../../shared/display-text.ts";
 import { formatActivityLabel, formatParallelOutcome } from "../../shared/status-format.ts";
-import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type CostSummary, type Details, type HostStepNode, type HostStepState, type LaunchResolvedChildExtensions, type RuntimeAcknowledgedChildExtensions, type NestedRunSummary, type SteeringStatus, type SubagentRunMode, type TimeoutRecoveryProjection, type TokenUsage, type TurnBudgetState, type UsageBudgetState, type WorktreeNaming, type WorkflowPreflight, type WorkflowGraphSnapshot } from "../../shared/types.ts";
+import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type CostSummary, type Details, type HostStepNode, type HostStepState, type LaunchResolvedChildExtensions, type RuntimeAcknowledgedChildExtensions, type ModelAttempt, type ModelRoutingSnapshot, type NestedRunSummary, type SteeringStatus, type SubagentRunMode, type TimeoutRecoveryProjection, type TokenUsage, type TurnBudgetState, type UsageBudgetState, type WorktreeNaming, type WorkflowPreflight, type WorkflowGraphSnapshot } from "../../shared/types.ts";
 import type { ResolvedSubagentCapabilityCeiling, SubagentCapabilityAudit } from "../shared/capability-ceiling.ts";
 import { readStatus } from "../../shared/utils.ts";
 import { attachRootChildrenToSteps, buildNestedRouteIndex, findNestedRouteForRootId, type NestedRoute, projectNestedEvents } from "../shared/nested-events.ts";
@@ -64,9 +64,11 @@ interface AsyncRunStepSummary {
 	totalCost?: CostSummary;
 	skills?: string[];
 	model?: string;
+	modelRouting?: ModelRoutingSnapshot;
 	contextLimit?: number;
 	thinking?: string;
 	attemptedModels?: string[];
+	modelAttempts?: ModelAttempt[];
 	sessionFile?: string;
 	transcriptPath?: string;
 	error?: string;
@@ -364,10 +366,12 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.totalCost ? { totalCost: step.totalCost } : {}),
 			...(step.skills ? { skills: step.skills } : {}),
 			...(step.model ? { model: step.model } : {}),
+			...(step.modelRouting ? { modelRouting: { ...step.modelRouting, candidates: [...step.modelRouting.candidates] } } : {}),
 			...(step.contextLimit !== undefined ? { contextLimit: step.contextLimit } : {}),
 			...(step.thinking ? { thinking: step.thinking } : {}),
 			...(step.thinkingCeiling ? { thinkingCeiling: step.thinkingCeiling } : {}),
 			...(step.attemptedModels ? { attemptedModels: step.attemptedModels } : {}),
+			...(step.modelAttempts ? { modelAttempts: step.modelAttempts.map((attempt) => ({ ...attempt, skippedModels: attempt.skippedModels ? [...attempt.skippedModels] : undefined })) } : {}),
 			...(step.sessionFile ? { sessionFile: step.sessionFile } : {}),
 			...(step.transcriptPath ? { transcriptPath: step.transcriptPath } : {}),
 			...(step.error ? { error: step.error } : {}),
@@ -615,6 +619,20 @@ function formatActivityFacts(input: { activityState?: ActivityState; lastActivit
 	return activity || facts.length ? [activity, ...facts].filter(Boolean).join(" | ") : undefined;
 }
 
+export function formatModelRoutingStatus(step: Pick<AsyncRunStepSummary, "model" | "thinking" | "modelRouting" | "attemptedModels" | "modelAttempts">): string {
+	const base = [step.modelRouting?.modelClass, formatModelThinking(step.model, step.thinking)].filter(Boolean).join(" → ");
+	if (!base) return "";
+	const candidates = step.modelRouting?.candidates ?? [];
+	const currentIndex = step.model ? candidates.indexOf(step.model) : -1;
+	const attemptNumber = currentIndex >= 0 ? currentIndex + 1 : step.attemptedModels?.length;
+	const attempt = step.modelRouting && attemptNumber ? ` (attempt ${attemptNumber}/${candidates.length})` : "";
+	const failed = step.modelAttempts?.findLast((entry) => !entry.success && (entry.failureCategory || entry.failoverReason));
+	const failure = failed
+		? ` [${[failed.failureCategory ? `failure: ${failed.failureCategory}` : undefined, failed.failoverReason ? `failover: ${failed.failoverReason}` : undefined].filter(Boolean).join("; ")}]`
+		: "";
+	return `${base}${attempt}${failure}`;
+}
+
 function formatStepLine(step: AsyncRunStepSummary): string {
 	const display = step.sessionName?.trim() || (step.label ? `${step.label} (${step.agent})` : step.agent);
 	const context = contextModeLabel(step.context);
@@ -622,7 +640,7 @@ function formatStepLine(step: AsyncRunStepSummary): string {
 	const parts = [`${step.index + 1}. ${phase}${display}${context ? ` ${context}` : ""}`, step.status];
 	const activity = formatActivityFacts(step);
 	if (activity) parts.push(activity);
-	const modelThinking = formatModelThinking(step.model, step.thinking);
+	const modelThinking = formatModelRoutingStatus(step);
 	if (modelThinking) parts.push(modelThinking);
 	if (step.durationMs !== undefined) parts.push(formatDuration(step.durationMs));
 	if (step.tokens) parts.push(`${formatTokens(step.tokens.total)} tok`);

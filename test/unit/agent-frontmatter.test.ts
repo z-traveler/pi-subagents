@@ -310,8 +310,8 @@ Review carefully.`);
 		}
 		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-runner-pi-only-"));
 		tempDirs.push(project);
-		writeAgent(path.join(project, ".pi", "agents", "external.md"), `---\nname: external\ndescription: External\nrunner:\n  type: external-cli\n  command: node\nmodel: provider/model\n---\nBody`);
-		assert.match(discoverAgents(project, "project").agentDiagnostics?.[0]?.error ?? "", /unsupported Pi-only fields: model/);
+		writeAgent(path.join(project, ".pi", "agents", "external.md"), `---\nname: external\ndescription: External\nrunner:\n  type: external-cli\n  command: node\nmodel: provider/model\nmodelClass: smart\n---\nBody`);
+		assert.match(discoverAgents(project, "project").agentDiagnostics?.[0]?.error ?? "", /unsupported Pi-only fields: model, modelClass/);
 	}));
 
 	it("keeps valid agents executable when another agent is malformed", () => withTempHome(() => {
@@ -1583,6 +1583,44 @@ Do work
 });
 
 describe("agent frontmatter fallbackModels", () => {
+	it("parses and serializes a semantic modelClass alongside concrete defaults", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agent-model-class-frontmatter-"));
+		tempDirs.push(dir);
+		const agentsDir = path.join(dir, ".pi", "agents");
+		fs.mkdirSync(agentsDir, { recursive: true });
+		fs.writeFileSync(path.join(agentsDir, "worker.md"), `---
+name: worker
+description: Worker
+modelClass: smart
+model: openai/gpt-5
+fallbackModels: anthropic/claude-sonnet-4
+---
+
+Do work
+`, "utf-8");
+
+		const worker = discoverAgents(dir, "project").agents.find((agent) => agent.name === "worker");
+		assert.equal(worker?.modelClass, "smart");
+		assert.equal(worker?.model, "openai/gpt-5");
+		assert.deepEqual(worker?.fallbackModels, ["anthropic/claude-sonnet-4"]);
+		assert.match(serializeAgent(worker!), /^modelClass: smart$/m);
+	});
+
+	it("rejects invalid modelClass frontmatter", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-invalid-model-class-"));
+		tempDirs.push(dir);
+		writeAgent(path.join(dir, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Worker
+modelClass: Smart Tier
+---
+
+Work.
+`);
+
+		assert.match(discoverAgents(dir, "project").agentDiagnostics?.[0]?.error ?? "", /modelClass.*lowercase kebab-case/);
+	});
+
 	it("serializes fallbackModels into agent frontmatter", () => {
 		const agent: AgentConfig = {
 			name: "worker",

@@ -4,7 +4,7 @@ import type { AgentConfig } from "../agents/agents.ts";
 import type { PiLaunchToolPlan } from "../runs/shared/child-tool-plan.ts";
 import type { ExtensionBindings } from "../runs/shared/extension-bindings.ts";
 
-export const AGENT_DEFINITION_PROJECTION_VERSION = 1 as const;
+export const AGENT_DEFINITION_PROJECTION_VERSION = 2 as const;
 // v2: the Intercom bridge prompt and tools are part of the binding on every
 // path, and the bridge text no longer names the parent session.
 export const LAUNCH_BINDING_PROJECTION_VERSION = 2 as const;
@@ -48,6 +48,7 @@ export function projectAgentDefinition(agent: AgentConfig): Record<string, unkno
 		inheritProjectContext: agent.inheritProjectContext,
 		inheritGlobalContext: agent.inheritGlobalContext,
 		inheritSkills: agent.inheritSkills,
+		modelClass: agent.modelClass,
 		model: agent.model,
 		modelProvider: agent.modelProvider,
 		fallbackModels: agent.fallbackModels,
@@ -89,6 +90,8 @@ export interface LaunchBindingInput {
 	task?: string;
 	model?: string;
 	modelCandidates?: string[];
+	modelClass?: string;
+	modelPoolDigest?: string;
 	fast?: boolean;
 	thinking?: string;
 	systemPrompt?: string | null;
@@ -117,6 +120,8 @@ export function projectLaunchBinding(input: LaunchBindingInput): Record<string, 
 		// The ordered candidate set already contains each attempted model; keeping only
 		// this set makes retries correlate to the same preflight binding.
 		modelCandidates: input.modelCandidates,
+		modelClass: input.modelClass,
+		modelPoolDigest: input.modelPoolDigest,
 		fast: input.fast,
 		thinking: input.thinking,
 		systemPromptDigest: input.systemPrompt === undefined || input.systemPrompt === null ? undefined : stableJsonDigest(input.systemPrompt),
@@ -152,7 +157,7 @@ export type LaunchBindingIdentity =
 	| ({ definitionDigest: string } & LaunchBindingPromptMode);
 
 export type LaunchBindingSource = LaunchBindingIdentity
-	& Pick<LaunchBindingInput, "fast" | "thinking" | "skills" | "outputPath" | "outputMode" | "structuredOutputSchema" | "extensionBindings">
+	& Pick<LaunchBindingInput, "modelClass" | "modelPoolDigest" | "fast" | "thinking" | "skills" | "outputPath" | "outputMode" | "structuredOutputSchema" | "extensionBindings">
 	& {
 		task: string;
 		modelCandidates: string[];
@@ -184,6 +189,8 @@ export function resolveLaunchBinding(source: LaunchBindingSource): LaunchBinding
 			...identity,
 			task: source.task,
 			modelCandidates: source.modelCandidates,
+			modelClass: source.modelClass,
+			modelPoolDigest: source.modelPoolDigest,
 			fast: source.fast,
 			thinking: source.thinking || undefined,
 			systemPrompt: source.systemPrompt,

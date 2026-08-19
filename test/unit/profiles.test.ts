@@ -142,6 +142,65 @@ describe("profiles helpers", () => {
 		assert.throws(() => applySubagentProfile("invalid"), /invalid fallbackModels.*array of strings or false/);
 	});
 
+	it("applies model pools and semantic agent model classes", () => {
+		const profilesDir = getSubagentProfilesDir();
+		fs.mkdirSync(profilesDir, { recursive: true });
+		fs.writeFileSync(path.join(profilesDir, "tiered.json"), JSON.stringify({
+			subagents: {
+				modelPools: { smart: ["openai/gpt-5", "anthropic/claude-sonnet-4"] },
+				agentOverrides: { worker: { modelClass: "smart" } },
+			},
+		}));
+		applySubagentProfile("tiered");
+		const settings = JSON.parse(fs.readFileSync(path.join(homeDir, ".pi", "agent", "settings.json"), "utf-8"));
+		assert.deepEqual(settings.subagents.modelPools.smart, ["openai/gpt-5", "anthropic/claude-sonnet-4"]);
+		assert.equal(settings.subagents.agentOverrides.worker.modelClass, "smart");
+	});
+
+	it("rejects invalid profile model classes and pools", () => {
+		const profilesDir = getSubagentProfilesDir();
+		fs.mkdirSync(profilesDir, { recursive: true });
+		fs.writeFileSync(path.join(profilesDir, "bad-class.json"), JSON.stringify({
+			subagents: { agentOverrides: { worker: { modelClass: "Smart Tier" } } },
+		}));
+		fs.writeFileSync(path.join(profilesDir, "bad-pool.json"), JSON.stringify({
+			subagents: { modelPools: { smart: [] }, agentOverrides: {} },
+		}));
+		assert.throws(() => applySubagentProfile("bad-class"), /modelClass/);
+		assert.throws(() => applySubagentProfile("bad-pool"), /non-empty array/);
+	});
+
+	it("checks every model-pool candidate and reuses probes for duplicates", async () => {
+		const profilesDir = getSubagentProfilesDir();
+		fs.mkdirSync(profilesDir, { recursive: true });
+		fs.writeFileSync(path.join(profilesDir, "tiered-check.json"), JSON.stringify({
+			subagents: {
+				modelPools: {
+					fast: ["openai/gpt-fast", "other/shared"],
+					smart: ["other/shared"],
+				},
+				agentOverrides: {},
+			},
+		}));
+		const probed: string[] = [];
+		const pi = { exec: async (_command: string, args: string[]) => {
+			probed.push(args[2]!);
+			return { stdout: "OK\n", stderr: "", code: 0, killed: false };
+		} };
+		const ctx = makeCtx(process.cwd(), [
+			{ provider: "openai", id: "gpt-fast" },
+			{ provider: "other", id: "shared" },
+		]);
+
+		const result = await checkSubagentProfile(pi, ctx as never, "tiered-check");
+		assert.deepEqual(result.results.map(({ modelClass, model }) => ({ modelClass, model })), [
+			{ modelClass: "fast", model: "openai/gpt-fast" },
+			{ modelClass: "fast", model: "other/shared" },
+			{ modelClass: "smart", model: "other/shared" },
+		]);
+		assert.deepEqual(probed, ["openai/gpt-fast", "other/shared"]);
+	});
+
 	it("rejects profile and provider path traversal names", async () => {
 		assert.throws(() => applySubagentProfile("../escape"), /safe file name/);
 		assert.throws(() => getProviderModelsPath("../escape"), /safe file name/);
