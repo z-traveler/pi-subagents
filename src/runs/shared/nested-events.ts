@@ -7,6 +7,7 @@ import {
 	type AsyncJobState,
 	type AsyncStatus,
 	type LaunchResolvedChildExtensions,
+	type ModelRoutingSnapshot,
 	type RuntimeAcknowledgedChildExtensions,
 	type NestedRouteInfo,
 	type TurnBudgetState,
@@ -293,6 +294,19 @@ function sanitizeState(value: unknown, fallback: NestedRunState): NestedRunState
 		: fallback;
 }
 
+function sanitizeModelRouting(value: unknown): ModelRoutingSnapshot | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const raw = value as Record<string, unknown>;
+	const modelClass = stringValue(raw.modelClass, 128);
+	const poolDigest = stringValue(raw.poolDigest, 256);
+	const source = raw.source;
+	if (!modelClass || !poolDigest || (source !== "per-run" && source !== "agent-override" && source !== "agent-frontmatter")) return undefined;
+	if (!Array.isArray(raw.candidates)) return undefined;
+	const candidates = raw.candidates.map((entry) => stringValue(entry, 512)).filter((entry): entry is string => Boolean(entry));
+	if (candidates.length === 0 || candidates.length !== raw.candidates.length) return undefined;
+	return { modelClass, source, poolDigest, candidates };
+}
+
 function sanitizeStep(input: unknown, depth: number): NestedStepSummary | undefined {
 	if (!input || typeof input !== "object") return undefined;
 	const raw = input as Record<string, unknown>;
@@ -302,11 +316,13 @@ function sanitizeStep(input: unknown, depth: number): NestedStepSummary | undefi
 		? raw.status
 		: "pending";
 	const model = stringValue(raw.model);
+	const modelRouting = sanitizeModelRouting(raw.modelRouting);
 	const thinking = THINKING_LEVELS.find((level) => level === raw.thinking);
 	return {
 		agent,
 		status,
 		...(model ? { model } : {}),
+		...(modelRouting ? { modelRouting } : {}),
 		...(thinking ? { thinking } : {}),
 		...(stringValue(raw.sessionName, 256) ? { sessionName: stringValue(raw.sessionName, 256) } : {}),
 		...(stringValue(raw.sessionFile, 2048) ? { sessionFile: stringValue(raw.sessionFile, 2048) } : {}),
@@ -1046,6 +1062,7 @@ export function nestedSummaryFromAsyncStatus(status: AsyncStatus, asyncDir: stri
 			...(step.sessionName ? { sessionName: step.sessionName } : {}),
 			status: step.status,
 			...(step.model ? { model: step.model } : {}),
+			...(step.modelRouting ? { modelRouting: { ...step.modelRouting, candidates: [...step.modelRouting.candidates] } } : {}),
 			...(step.thinking ? { thinking: step.thinking } : {}),
 			...(step.sessionFile ? { sessionFile: step.sessionFile } : {}),
 			...(step.activityState ? { activityState: step.activityState } : {}),

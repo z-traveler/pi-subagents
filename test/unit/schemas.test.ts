@@ -184,6 +184,15 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.equal(validator.Check({ ...base, outputSchema: null }), false);
 	});
 
+	it("exposes modelClass independently from concrete model overrides", () => {
+		const properties = SubagentParams?.properties as Record<string, JsonSchemaNode> | undefined;
+		assert.equal(properties?.modelClass?.type, "string");
+		assert.match(String(properties?.modelClass?.description ?? ""), /named model pool/i);
+		assert.equal((schemas.ParallelTaskSchema as JsonSchemaNode).properties?.modelClass?.type, "string");
+		assert.equal((schemas.DynamicParallelTemplateSchema as JsonSchemaNode).properties?.modelClass?.type, "string");
+		assert.equal((schemas.ChainItem as JsonSchemaNode).properties?.modelClass?.type, "string");
+	});
+
 	it("includes context field and default precedence for fresh/fork execution mode", () => {
 		const contextSchema = SubagentParams?.properties?.context;
 		assert.ok(contextSchema, "context schema should exist");
@@ -465,7 +474,9 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.ok(SubagentParams, "SubagentParams schema should exist");
 		const schema = SubagentParams as unknown as JsonSchemaNode;
 		const serialized = JSON.stringify(schema);
-		assert.ok(serialized.length <= 13_010, `expected concise schema at or under 13,010 chars, got ${serialized.length}`);
+
+		// 13_100: the local model-class pool selector adds one compact documented property.
+		assert.ok(serialized.length <= 13_100, `expected concise schema at or under 13.1k chars, got ${serialized.length}`);
 		assert.equal(serialized.includes('"$ref"'), false);
 		assert.equal(serialized.includes('"$defs"'), false);
 		assert.equal(serialized.split("Evidence policy;").length - 1, 1);

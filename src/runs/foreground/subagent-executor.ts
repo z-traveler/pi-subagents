@@ -31,10 +31,14 @@ import { handleWatchdogToolAction, WATCHDOG_TOOL_ACTIONS } from "../../watchdog/
 import type { MainWatchdogRuntime } from "../../watchdog/runtime.ts";
 import { applyWatchdogLaunchRules } from "../../watchdog/rules.ts";
 import { childWatchdogProgressForModel } from "../../watchdog/child-status.ts";
-import { normalizeParentModel, resolveEffectiveSubagentModel, resolveModelOrigin, resolveModelSelection, scopedModelIdsFromContext, type ModelOrigin, type ParentModel } from "../shared/model-resolution.ts";
+
+import { scopedModelIdsFromContext } from "../shared/model-resolution.ts";
+
+import { normalizeParentModel, resolveModelOrigin, resolveModelRouting, toModelRoutingSnapshot, type ModelOrigin, type ModelRoutingResolution, type ParentModel } from "../shared/model-fallback.ts";
+import type { ModelPools, ModelPoolSources } from "../../shared/model-routing.ts";
 import { projectChainOutputSchemas, resolveEffectiveOutputSchema } from "../shared/child-launch-plan.ts";
 import { formatRetainedChildren, listRetainedChildren } from "../background/retained-children.ts";
-import { resolveModelScopesForAgent, type ModelScopeConfig } from "../shared/model-scope.ts";
+import { resolveModelScopesForAgent, type ModelScopeCheckRule, type ModelScopeConfig } from "../shared/model-scope.ts";
 import { recordRun } from "../shared/run-history.ts";
 import {
 	getStepAgents,
@@ -87,7 +91,7 @@ import {
 	resolveSubagentResultStatus,
 	stripDetailsOutputsForIntercomReceipt,
 } from "../../intercom/result-intercom.ts";
-import { applySteeringRecoveryAgentConfig, asyncReviveRequiresRecoveryDescriptor, buildRevivedAsyncTask, readAsyncRecoveryDescriptor, resolveAsyncResumeTarget, resolveAsyncRunLocation } from "../background/async-resume.ts";
+import { applySteeringRecoveryAgentConfig, asyncReviveRequiresRecoveryDescriptor, buildRevivedAsyncTask, readAsyncRecoveryDescriptor, resolveAsyncResumeTarget, resolveAsyncRunLocation, resolveRecoveryModelCandidates } from "../background/async-resume.ts";
 import { closeSteerInbox, consumeSteerRequests, deliverInterruptRequest, readRevivalBriefs, requestAsyncSteer, watchAsyncControlInbox, type SteerDeliveryMode, type SteerRequest } from "../background/control-channel.ts";
 import { createSteeringStatus, recordSteeringRequest, steeringStatus, updateSteeringTarget, waitForSteeringAction } from "../background/steering.ts";
 import { canQueueRetainedAsyncFollowUp, steerAsyncRun } from "./async-steering-action.ts";
@@ -310,6 +314,7 @@ interface TaskParam {
 	reads?: string[] | boolean;
 	progress?: boolean;
 	model?: string;
+	modelClass?: string;
 	fast?: boolean;
 	skill?: string | string[] | boolean;
 	outputSchema?: JsonSchemaObject | false;
@@ -406,6 +411,7 @@ export interface SubagentParamsLike {
 	artifacts?: boolean;
 	includeProgress?: boolean;
 	model?: string;
+	modelClass?: string;
 	/** Internal recovery provenance for a resolved model override. */
 	modelOrigin?: ModelOrigin;
 	fast?: boolean;
@@ -467,7 +473,8 @@ interface ExecutorDeps {
 	tempArtifactsDir: string;
 	getSubagentSessionRoot: (parentSessionFile: string | null) => string;
 	expandTilde: (p: string) => string;
-	discoverAgents: (cwd: string, scope: AgentScope, preferredModelProvider?: string) => { agents: AgentConfig[]; agentDiagnostics?: AgentDiscoveryDiagnostic[]; modelScope?: ModelScopeConfig; maxThinking?: AgentConfig["maxThinking"]; cwd?: string; scope?: AgentScope; directories?: UnknownAgentDiagnosticContext["directories"] };
+
+	discoverAgents: (cwd: string, scope: AgentScope, preferredModelProvider?: string) => { agents: AgentConfig[]; agentDiagnostics?: AgentDiscoveryDiagnostic[]; modelScope?: ModelScopeConfig; modelPools?: ModelPools; modelPoolSources?: ModelPoolSources; maxThinking?: AgentConfig["maxThinking"]; cwd?: string; scope?: AgentScope; directories?: UnknownAgentDiagnosticContext["directories"] };
 	discoverAgentsAll?: typeof discoverAgentsAll;
 	onAgentsChanged?: () => void;
 	allowMutatingManagementActions?: boolean;
@@ -539,6 +546,8 @@ interface ExecutionContextData {
 	configToolBudget?: ResolvedToolBudget;
 	contextPolicy: AgentDefaultContextPolicy;
 	modelScope?: ModelScopeConfig;
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
 	parentModel?: ParentModel;
 	scopedModelIds?: string[];
 	parentSessionId: string | null;
@@ -548,6 +557,35 @@ interface ExecutionContextData {
 	topLevelAsyncCapacityEligible: boolean;
 	activeAsyncCapacity?: ActiveAsyncCapacityHandle;
 	workflowChildPermitLaunch?: WorkflowChildPermitContext;
+}
+
+function resolveLaunchModelRouting(input: {
+	agentConfig: AgentConfig;
+	explicitModel?: string;
+	explicitModelClass?: string;
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
+	parentModel?: ParentModel;
+	availableModels: ModelInfo[];
+	currentProvider?: string;
+	modelScope?: ModelScopeCheckRule | ModelScopeCheckRule[];
+	modelOrigin?: ModelOrigin;
+}): ModelRoutingResolution {
+	return resolveModelRouting({
+		explicitModel: input.explicitModel,
+		explicitModelClass: input.explicitModelClass,
+		agentModel: input.agentConfig.model,
+		agentFallbackModels: input.agentConfig.fallbackModels,
+		agentModelClass: input.agentConfig.modelClass,
+		agentModelClassSource: input.agentConfig.modelClassSource === "agent-override" ? "agent-override" : "agent-frontmatter",
+		modelPools: input.modelPools,
+		modelPoolSources: input.modelPoolSources,
+		parentModel: input.parentModel,
+		availableModels: input.availableModels,
+		preferredProvider: input.agentConfig.modelProvider ?? input.currentProvider,
+		modelScope: input.modelScope,
+		modelOrigin: input.modelOrigin,
+	});
 }
 
 function resolveRequestedCwd(runtimeCwd: string, requestedCwd: string | undefined): string {
@@ -1404,6 +1442,8 @@ function appendStepToAsyncChain(input: {
 		agents,
 		ctx: asyncCtx,
 		availableModels: input.ctx.modelRegistry.getAvailable().map(toModelInfo),
+		modelPools: discoveredForAppend.modelPools,
+		modelPoolSources: discoveredForAppend.modelPoolSources,
 		unknownAgentDiagnosticContext: diagnosticContextFromDiscovery(discoveredForAppend, input.requestCwd, scope),
 		cwd: status.cwd ?? input.requestCwd,
 		chainSkills,
@@ -1904,6 +1944,7 @@ async function resumeAsyncRun(input: {
 			details: { mode: "management", results: [] },
 		};
 	}
+
 	const timeoutOverflowError = timerDelayOverflowError("timeoutMs", input.params.timeoutMs);
 	if (timeoutOverflowError) {
 		return {
@@ -1912,9 +1953,9 @@ async function resumeAsyncRun(input: {
 			details: { mode: "management", results: [] },
 		};
 	}
-	if (input.params.model !== undefined) {
+	if (input.params.model !== undefined || input.params.modelClass !== undefined) {
 		return {
-			content: [{ type: "text", text: "action='resume' reuses the persisted child model and does not accept a model override." }],
+			content: [{ type: "text", text: "action='resume' reuses the persisted child model routing contract and does not accept model or modelClass overrides." }],
 			isError: true,
 			details: { mode: "management", results: [] },
 		};
@@ -2102,6 +2143,8 @@ async function resumeAsyncRun(input: {
 		projectTrusted: sessionProjectTrust(input.ctx),
 			}),
 			availableModels,
+			modelPools: discovered.modelPools,
+			modelPoolSources: discovered.modelPoolSources,
 			cwd: effectiveCwd,
 			maxOutput: input.params.maxOutput,
 			artifactsDir: getArtifactsDir(parentSessionFile, effectiveCwd, artifactConfig.dir),
@@ -2246,7 +2289,9 @@ async function resumeAsyncRun(input: {
 			...(input.deps.state.currentSessionId ? { parentSessionId: input.deps.state.currentSessionId } : {}),
 		},
 		context: recoveryContext,
-		modelOverride: recoveryDescriptor?.model ?? target.model,
+		modelOverride: target.model ?? recoveryDescriptor?.model,
+		modelCandidates: resolveRecoveryModelCandidates(target.model, recoveryDescriptor),
+		modelRouting: recoveryDescriptor?.modelRouting,
 		fast: recoveryDescriptor?.fast,
 		modelOverrideFromParent: recoveryDescriptor?.modelOverrideFromParent,
 		modelOrigin: recoveryDescriptor?.modelOrigin ?? (recoveryDescriptor?.modelOverrideFromParent ? "inherited" : undefined),
@@ -2624,6 +2669,41 @@ function validateExecutionInput(
 	allowClarifyTaskPrompt: boolean,
 	context: UnknownAgentDiagnosticContext,
 ): AgentToolResult<Details> | null {
+	const routingError = (message: string): AgentToolResult<Details> => ({
+		content: [{ type: "text", text: message }],
+		isError: true,
+		details: { mode: getRequestedModeLabel(params), results: [] },
+	});
+	const validateRouting = (agentName: string, model: string | undefined, modelClass: string | undefined, label: string): AgentToolResult<Details> | null => {
+		if (model !== undefined && modelClass !== undefined) return routingError(`${label} cannot set both 'model' and 'modelClass'.`);
+		const agent = agents.find((candidate) => candidate.name === agentName);
+		if ((agent?.runner?.type === "external-cli" || agent?.runner?.type === "external-job") && (modelClass !== undefined || agent.modelClass !== undefined)) {
+			return routingError(`${label} uses runner.type='${agent.runner.type}' and does not support modelClass routing.`);
+		}
+		return null;
+	};
+	if (hasSingle && params.agent) {
+		const error = validateRouting(params.agent, params.model, params.modelClass, `Agent '${params.agent}'`);
+		if (error) return error;
+	}
+	if (hasTasks && params.tasks) {
+		for (let index = 0; index < params.tasks.length; index++) {
+			const task = params.tasks[index]!;
+			const error = validateRouting(task.agent, task.model, task.modelClass, `Task ${index + 1} (${task.agent})`);
+			if (error) return error;
+		}
+	}
+	if (hasChain && params.chain) {
+		for (let stepIndex = 0; stepIndex < params.chain.length; stepIndex++) {
+			const step = params.chain[stepIndex]!;
+			const entries = isParallelStep(step) ? step.parallel : isDynamicParallelStep(step) ? [step.parallel] : "agent" in step ? [step as SequentialStep] : [];
+			for (let taskIndex = 0; taskIndex < entries.length; taskIndex++) {
+				const entry = entries[taskIndex]!;
+				const error = validateRouting(entry.agent, entry.model, entry.modelClass, `Chain step ${stepIndex + 1}${entries.length > 1 ? ` task ${taskIndex + 1}` : ""} (${entry.agent})`);
+				if (error) return error;
+			}
+		}
+	}
 	if (Number(hasChain) + Number(hasTasks) + Number(hasSingle) !== 1) {
 		const agentList = agents.map((a) => a.name).join(", ") || "none";
 		const noMode = !hasChain && !hasTasks && !hasSingle;
@@ -3144,27 +3224,32 @@ function resolveStaticLaunchSummary(input: {
 	agent: string;
 	index: number;
 	explicitModel?: string;
+	explicitModelClass?: string;
 	agents: AgentConfig[];
 	parentModel?: ParentModel;
 	scopedModelIds?: string[];
 	availableModels: ModelInfo[];
 	currentProvider?: string;
 	modelScope?: ModelScopeConfig;
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
 	thinkingOverrideForTask: ThinkingOverrideForTask;
 }): StaticLaunchSummary {
 	const agentConfig = input.agents.find((agent) => agent.name === input.agent);
 	const externalRunner = agentConfig?.runner?.type === "external-cli" || agentConfig?.runner?.type === "external-job";
+
 	const modelScopes = resolveModelScopesForAgent(input.modelScope, input.agent, input.parentModel, input.scopedModelIds);
-	const model = externalRunner
-		? undefined
-		: resolveEffectiveSubagentModel(
-			input.explicitModel,
-			agentConfig?.model,
-			input.parentModel,
-			input.availableModels,
-			agentConfig?.modelProvider ?? input.currentProvider,
-			modelScopes.length === 0 ? {} : { scope: modelScopes },
-		);
+	const model = externalRunner || !agentConfig ? undefined : resolveLaunchModelRouting({
+		agentConfig,
+		explicitModel: input.explicitModel,
+		explicitModelClass: input.explicitModelClass,
+		modelPools: input.modelPools,
+		modelPoolSources: input.modelPoolSources,
+		parentModel: input.parentModel,
+		availableModels: input.availableModels,
+		currentProvider: input.currentProvider,
+		modelScope: modelScopes,
+	}).primaryModel;
 	const thinkingOverride = externalRunner ? undefined : input.thinkingOverrideForTask();
 	const thinking = externalRunner ? undefined : resolveEffectiveThinking(model, thinkingOverride ?? agentConfig?.thinking);
 	return {
@@ -3182,29 +3267,34 @@ function collectStaticLaunchSummaries(input: {
 	availableModels: ModelInfo[];
 	currentProvider?: string;
 	modelScope?: ModelScopeConfig;
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
 	thinkingOverrideForTask: ThinkingOverrideForTask;
 	dynamicFanoutMaxItems?: number;
 }): StaticLaunchSummary[] {
-	const summary = (agent: string, index: number, explicitModel?: string) => resolveStaticLaunchSummary({
+	const summary = (agent: string, index: number, explicitModel?: string, explicitModelClass?: string) => resolveStaticLaunchSummary({
 		agent,
 		index,
 		explicitModel,
+		explicitModelClass,
 		agents: input.agents,
 		parentModel: input.parentModel,
 		scopedModelIds: input.scopedModelIds,
 		availableModels: input.availableModels,
 		currentProvider: input.currentProvider,
 		modelScope: input.modelScope,
+		modelPools: input.modelPools,
+		modelPoolSources: input.modelPoolSources,
 		thinkingOverrideForTask: input.thinkingOverrideForTask,
 	});
-	if (input.params.tasks) return input.params.tasks.map((task, index) => summary(task.agent, index, task.model));
+	if (input.params.tasks) return input.params.tasks.map((task, index) => summary(task.agent, index, task.model, task.modelClass));
 	if (input.params.chain?.length) {
 		const launches: StaticLaunchSummary[] = [];
 		let flatIndex = 0;
 		for (const step of input.params.chain) {
 			if (isParallelStep(step)) {
 				for (const task of step.parallel) {
-					launches.push(summary(task.agent, flatIndex, task.model));
+					launches.push(summary(task.agent, flatIndex, task.model, task.modelClass));
 					flatIndex++;
 				}
 				continue;
@@ -3212,18 +3302,18 @@ function collectStaticLaunchSummaries(input: {
 			if (isDynamicParallelStep(step)) {
 				const maxItems = step.expand.maxItems ?? input.dynamicFanoutMaxItems ?? 0;
 				for (let itemIndex = 0; itemIndex < maxItems; itemIndex++) {
-					launches.push(summary(step.parallel.agent, flatIndex, step.parallel.model));
+					launches.push(summary(step.parallel.agent, flatIndex, step.parallel.model, step.parallel.modelClass));
 					flatIndex++;
 				}
 				continue;
 			}
 			const sequential = step as SequentialStep;
-			launches.push(summary(sequential.agent, flatIndex, sequential.model));
+			launches.push(summary(sequential.agent, flatIndex, sequential.model, sequential.modelClass));
 			flatIndex++;
 		}
 		return launches;
 	}
-	return input.params.agent ? [summary(input.params.agent, 0, input.params.model as string | undefined)] : [];
+	return input.params.agent ? [summary(input.params.agent, 0, input.params.model as string | undefined, input.params.modelClass)] : [];
 }
 
 function firstRawChainTask(chain: ChainStep[]): string | undefined {
@@ -3545,12 +3635,21 @@ async function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 			agentModel: a.model,
 			parentModel,
 		});
+		const modelRouting = a.runner?.type === "external-cli" || a.runner?.type === "external-job" ? undefined : resolveLaunchModelRouting({
+			agentConfig: a,
+			explicitModel: params.model as string | undefined,
+			explicitModelClass: params.modelClass,
+			modelPools: data.modelPools,
+			modelPoolSources: data.modelPoolSources,
+			parentModel,
+			availableModels,
+			currentProvider,
+			modelScope: modelScopes,
+			modelOrigin,
+		});
 		const modelOverride = a.runner?.type === "external-cli" || a.runner?.type === "external-job"
 			? params.model ?? (externalRunnerWithoutExplicitModel ? undefined : a.model)
-			: resolveEffectiveSubagentModel(params.model as string | undefined, a.model, parentModel, availableModels, a.modelProvider ?? currentProvider, {
-				...(modelScopes.length === 0 ? {} : { scope: modelScopes }),
-				source: modelOrigin === "explicit" ? "explicit" : "inherited",
-			});
+			: modelRouting?.primaryModel;
 		const modelOverrideFromParent = modelOrigin === "inherited";
 		const launchRuleError = applyWatchdogLaunchRules({ cwd: effectiveCwd, agent: a.name, model: modelOverride ?? (parentModel && `${parentModel.provider}/${parentModel.id}`), warn: (violation) => deps.watchdog?.displayRuleWarning(violation) });
 		if (launchRuleError) return toExecutionErrorResult(params, new Error(launchRuleError), data.contextPolicy.contextSummary);
@@ -3582,6 +3681,8 @@ async function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 			...(params.reads !== undefined ? { reads: params.reads } : {}),
 			outputBaseDir: resolveSingleRunOutputBaseDir(deps, artifactsDir, id),
 			modelOverride,
+			modelCandidates: modelRouting?.modelCandidates,
+			modelRouting: modelRouting ? toModelRoutingSnapshot(modelRouting) : undefined,
 			fast: params.fast,
 			modelOverrideFromParent,
 			modelOrigin,
@@ -4069,17 +4170,19 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		agentModel: agentConfig.model,
 		parentModel,
 	});
-	let modelOverride: string | undefined = resolveEffectiveSubagentModel(
-		params.model as string | undefined,
-		agentConfig.model,
+	const modelRouting = resolveLaunchModelRouting({
+		agentConfig,
+		explicitModel: params.model as string | undefined,
+		explicitModelClass: params.modelClass,
+		modelPools: data.modelPools,
+		modelPoolSources: data.modelPoolSources,
 		parentModel,
 		availableModels,
-		agentConfig.modelProvider ?? currentProvider,
-		{
-			...(modelScopes.length === 0 ? {} : { scope: modelScopes }),
-			source: modelOrigin === "explicit" ? "explicit" : "inherited",
-		},
-	);
+		currentProvider,
+		modelScope: modelScopes,
+		modelOrigin,
+	});
+	let modelOverride: string | undefined = modelRouting.primaryModel;
 	const modelOverrideFromParent = modelOrigin === "inherited";
 	const launchRuleError = applyWatchdogLaunchRules({ cwd: effectiveCwd, agent: agentConfig.name, model: modelOverride ?? (parentModel && `${parentModel.provider}/${parentModel.id}`), warn: (violation) => deps.watchdog?.displayRuleWarning(violation) });
 	if (launchRuleError) return toExecutionErrorResult(params, new Error(launchRuleError), data.contextPolicy.contextSummary);
@@ -4296,6 +4399,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 			nestedRoute: foregroundControl?.nestedRoute,
 			index: 0,
 			modelOverride,
+			modelCandidates: modelRouting.modelCandidates,
+			modelRouting: toModelRoutingSnapshot(modelRouting),
 			fast: params.fast,
 			modelOverrideFromParent,
 			modelOrigin,
@@ -7652,6 +7757,8 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			configToolTimeoutMs: deps.config.toolTimeoutMs,
 			contextPolicy,
 			modelScope,
+			modelPools: discovered.modelPools,
+			modelPoolSources: discovered.modelPoolSources,
 			parentModel: requestParentModel,
 			scopedModelIds: scopedModelIdsFromContext(ctx),
 			parentSessionId: requestSessionId,
@@ -7749,6 +7856,8 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 					availableModels: ctx.modelRegistry.getAvailable().map(toModelInfo),
 					currentProvider: requestParentModel?.provider,
 					modelScope,
+					modelPools: discovered.modelPools,
+					modelPoolSources: discovered.modelPoolSources,
 					thinkingOverrideForTask,
 					dynamicFanoutMaxItems: deps.config.chain?.dynamicFanout?.maxItems,
 				});

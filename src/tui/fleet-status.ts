@@ -225,7 +225,8 @@ function nestedFleetRows(children: NestedRunSummary[] | undefined, visibleLimit:
 						return false;
 					}
 					const step = steps[stepIndex]!;
-					const modelThinking = formatModelThinking(step.model, step.thinking) || undefined;
+
+					const modelThinking = [step.modelRouting?.modelClass, formatModelThinking(step.model, step.thinking)].filter(Boolean).join(" → ") || undefined;
 					const thinking = childThinkingLevel(step);
 					const activity = nestedActivity(step);
 					rows.push({
@@ -489,7 +490,7 @@ export function collectFleetStatusEntries(state: SubagentState): FleetStatusEntr
 			if (!isActiveState(step.status)) continue;
 			const index = step.index ?? offset;
 			if (step.status === "pending" && job.mode === "chain" && !job.activeParallelGroup && index !== (job.currentStep ?? 0)) continue;
-			const modelThinking = formatModelThinking(step.model, step.thinking) || undefined;
+			const modelThinking = [step.modelRouting?.modelClass, formatModelThinking(step.model, step.thinking)].filter(Boolean).join(" → ") || undefined;
 			entries.push({
 				key: `async:${job.asyncId}:${index}`,
 				...(linkedParentKey ? { parentKey: linkedParentKey } : {}),
