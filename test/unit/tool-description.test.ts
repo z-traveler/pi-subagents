@@ -67,6 +67,7 @@ describe("registered subagent tool description", () => {
 
 	it("keeps call shapes, discovery and safety rules in every built-in mode", () => {
 		for (const description of [DEFAULT_SUBAGENT_TOOL_DESCRIPTION, FULL_SUBAGENT_TOOL_DESCRIPTION, COMPACT_SUBAGENT_TOOL_DESCRIPTION]) {
+			assert.match(description, /modelClass.*semantic tier.*never set both.*stays inside that class/i);
 			for (const contract of [
 				/One child: \{agent,task\}/,
 				/exactly one top-level subagent workflow call with async:true; write one ```js workflow block in this reply, then call subagent\(\{workflow:true\}\)/,

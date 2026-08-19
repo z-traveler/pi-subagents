@@ -48,6 +48,7 @@ export function projectAgentDefinition(agent: AgentConfig): Record<string, unkno
 		inheritProjectContext: agent.inheritProjectContext,
 		inheritGlobalContext: agent.inheritGlobalContext,
 		inheritSkills: agent.inheritSkills,
+		modelClass: agent.modelClass,
 		model: agent.model,
 		modelProvider: agent.modelProvider,
 		fast: agent.fast,
@@ -88,6 +89,9 @@ export interface LaunchBindingInput {
 	/** Caller task; runtime acceptance/output task annotations are explicitly outside the preflight-known subset. */
 	task?: string;
 	model?: string;
+	modelCandidates?: string[];
+	modelClass?: string;
+	modelPoolDigest?: string;
 	fast?: boolean;
 	thinking?: string;
 	systemPrompt?: string | null;
@@ -114,6 +118,11 @@ export function projectLaunchBinding(input: LaunchBindingInput): Record<string, 
 		definitionDigest: input.definitionDigest,
 		taskDigest: input.task === undefined ? undefined : stableJsonDigest(input.task),
 		model: input.model,
+		// The ordered candidate set already contains each attempted model; keeping only
+		// this set makes retries correlate to the same preflight binding.
+		modelCandidates: input.modelCandidates,
+		modelClass: input.modelClass,
+		modelPoolDigest: input.modelPoolDigest,
 		fast: input.fast,
 		thinking: input.thinking,
 		systemPromptDigest: input.systemPrompt === undefined || input.systemPrompt === null ? undefined : stableJsonDigest(input.systemPrompt),
@@ -149,7 +158,7 @@ export type LaunchBindingIdentity =
 	| ({ definitionDigest: string } & LaunchBindingPromptMode);
 
 export type LaunchBindingSource = LaunchBindingIdentity
-	& Pick<LaunchBindingInput, "fast" | "thinking" | "skills" | "outputPath" | "outputMode" | "structuredOutputSchema" | "extensionBindings">
+	& Pick<LaunchBindingInput, "modelCandidates" | "modelClass" | "modelPoolDigest" | "fast" | "thinking" | "skills" | "outputPath" | "outputMode" | "structuredOutputSchema" | "extensionBindings">
 	& {
 		task: string;
 		model?: string;
@@ -181,6 +190,9 @@ export function resolveLaunchBinding(source: LaunchBindingSource): LaunchBinding
 			...identity,
 			task: source.task,
 			model: source.model,
+			modelCandidates: source.modelCandidates,
+			modelClass: source.modelClass,
+			modelPoolDigest: source.modelPoolDigest,
 			fast: source.fast,
 			thinking: source.thinking || undefined,
 			systemPrompt: source.systemPrompt,
