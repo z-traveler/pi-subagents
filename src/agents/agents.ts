@@ -26,6 +26,7 @@ import { validatePermissionRules, type PermissionRules } from "../runs/shared/pe
 import { parseThinkingLevel, type ThinkingLevel } from "../shared/thinking-ceiling.ts";
 import { assertJsonSchemaObject } from "../runs/shared/structured-output.ts";
 import { normalizeCapabilityCeilingAllowedAgents } from "../runs/shared/capability-ceiling.ts";
+import { mergeModelPools, parseModelClass, parseModelPools, type ModelPools, type ModelPoolSources } from "../shared/model-routing.ts";
 
 export type AgentScope = "user" | "project" | "both";
 
@@ -58,8 +59,10 @@ export interface BuiltinAgentOverrideBase {
 	output?: string;
 	outputMode?: OutputMode;
 	defaultReads?: string[];
+	modelClass?: string;
 	model?: string;
 	modelProvider?: string;
+	fallbackModels?: string[];
 	fast?: boolean;
 	thinking?: string | false;
 	systemPromptMode: SystemPromptMode;
@@ -90,8 +93,10 @@ interface BuiltinAgentOverrideConfig {
 	output?: string | false;
 	outputMode?: OutputMode;
 	defaultReads?: string[] | false;
+	modelClass?: string | false;
 	model?: string | false;
 	defaultProvider?: string | false;
+	fallbackModels?: string[] | false;
 	fast?: boolean;
 	thinking?: string | false;
 	systemPromptMode?: SystemPromptMode;
@@ -145,8 +150,11 @@ export interface AgentConfig {
 	allowNestedSubagents?: boolean;
 	allowedAgents?: string[];
 	mcpDirectTools?: string[];
+	modelClass?: string;
+	modelClassSource?: "frontmatter" | "agent-override";
 	model?: string;
 	modelProvider?: string;
+	fallbackModels?: string[];
 	fast?: boolean;
 	thinking?: string | false;
 	systemPromptMode: SystemPromptMode;
@@ -200,6 +208,7 @@ interface SubagentSettings {
 	providerOverrides: Record<string, Record<string, BuiltinAgentOverrideConfig>>;
 	agentScanDirs?: string[];
 	agentExcludeDirs?: string[];
+	modelPools?: ModelPools;
 	defaultModel?: string;
 	defaultProvider?: string;
 	defaultThinking?: string;
@@ -322,6 +331,8 @@ export interface AgentDiscoveryResult {
 	scope: AgentScope;
 	directories: readonly AgentDefinitionDirectoryReport[];
 	modelScope?: ModelScopeConfig;
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
 	maxThinking?: ThinkingLevel;
 }
 
@@ -774,8 +785,10 @@ function cloneOverrideBase(agent: AgentConfig): BuiltinAgentOverrideBase {
 		...(agent.output !== undefined ? { output: agent.output } : {}),
 		...(agent.outputMode !== undefined ? { outputMode: agent.outputMode } : {}),
 		...(agent.defaultReads !== undefined ? { defaultReads: [...agent.defaultReads] } : {}),
+		...(agent.modelClass !== undefined ? { modelClass: agent.modelClass } : {}),
 		...(agent.model !== undefined ? { model: agent.model } : {}),
 		...(agent.modelProvider !== undefined ? { modelProvider: agent.modelProvider } : {}),
+		...(agent.fallbackModels ? { fallbackModels: [...agent.fallbackModels] } : {}),
 		...(agent.fast !== undefined ? { fast: agent.fast } : {}),
 		...(agent.thinking !== undefined ? { thinking: agent.thinking } : {}),
 		systemPromptMode: agent.systemPromptMode,
@@ -807,8 +820,12 @@ function cloneOverrideValue(override: BuiltinAgentOverrideConfig): BuiltinAgentO
 		...(override.output !== undefined ? { output: override.output } : {}),
 		...(override.outputMode !== undefined ? { outputMode: override.outputMode } : {}),
 		...(override.defaultReads !== undefined ? { defaultReads: override.defaultReads === false ? false : [...override.defaultReads] } : {}),
+		...(override.modelClass !== undefined ? { modelClass: override.modelClass } : {}),
 		...(override.model !== undefined ? { model: override.model } : {}),
 		...(override.defaultProvider !== undefined ? { defaultProvider: override.defaultProvider } : {}),
+		...(override.fallbackModels !== undefined
+			? { fallbackModels: override.fallbackModels === false ? false : [...override.fallbackModels] }
+			: {}),
 		...(override.fast !== undefined ? { fast: override.fast } : {}),
 		...(override.thinking !== undefined ? { thinking: override.thinking } : {}),
 		...(override.systemPromptMode !== undefined ? { systemPromptMode: override.systemPromptMode } : {}),
@@ -998,9 +1015,6 @@ function parseBuiltinOverrideEntry(
 	}
 
 	const input = value as Record<string, unknown>;
-	if (Object.hasOwn(input, "fallbackModels")) {
-		throw new Error(`Builtin override '${name}' in '${filePath}' uses removed field 'fallbackModels'; configure one model instead.`);
-	}
 	const override: BuiltinAgentOverrideConfig = {};
 
 	if ("description" in input) {
@@ -1032,6 +1046,13 @@ function parseBuiltinOverrideEntry(
 	if ("model" in input) {
 		if (typeof input.model === "string" || input.model === false) override.model = input.model;
 		else throw new Error(`Builtin override '${name}' in '${filePath}' has invalid 'model'; expected a string or false.`);
+	}
+	if ("modelClass" in input) {
+		if (input.modelClass === false) override.modelClass = false;
+		else override.modelClass = parseModelClass(input.modelClass, `Builtin override '${name}' in '${filePath}' field 'modelClass'`);
+	}
+	if (override.model !== undefined && override.modelClass !== undefined) {
+		throw new Error(`Builtin override '${name}' in '${filePath}' cannot set both 'model' and 'modelClass'.`);
 	}
 
 	if ("fast" in input) {
@@ -1125,6 +1146,8 @@ function parseBuiltinOverrideEntry(
 	const defaultReads = parseOverrideStringArrayOrFalse(input.defaultReads, { filePath, name, field: "defaultReads" });
 	if (defaultReads !== undefined) override.defaultReads = defaultReads;
 
+	const fallbackModels = parseOverrideStringArrayOrFalse(input.fallbackModels, { filePath, name, field: "fallbackModels" });
+	if (fallbackModels !== undefined) override.fallbackModels = fallbackModels;
 
 	if ("defaultProvider" in input) {
 		if (input.defaultProvider === false) override.defaultProvider = false;
@@ -1246,6 +1269,7 @@ function readSubagentSettings(filePath: string | null): SubagentSettings {
 		agentExcludeDirs = subagentsObject.agentExcludeDirs.map((item) => item.trim());
 	}
 	const modelScope = parseModelScopeConfig(subagentsObject.modelScope, { filePath });
+	const modelPools = parseModelPools(subagentsObject.modelPools, filePath);
 
 	const parsed: Record<string, BuiltinAgentOverrideConfig> = {};
 	const providerOverrides: Record<string, Record<string, BuiltinAgentOverrideConfig>> = {};
@@ -1265,6 +1289,7 @@ function readSubagentSettings(filePath: string | null): SubagentSettings {
 		...(disableBuiltins !== undefined ? { disableBuiltins } : {}),
 		...(disableThinking !== undefined ? { disableThinking } : {}),
 		...(modelScope !== undefined ? { modelScope } : {}),
+		...(modelPools !== undefined ? { modelPools } : {}),
 	};
 	if (agentOverrides && typeof agentOverrides === "object" && !Array.isArray(agentOverrides)) {
 		for (const [name, value] of Object.entries(agentOverrides)) {
@@ -1469,14 +1494,26 @@ function applyBuiltinOverride(
 	if (override.output !== undefined) { if (override.output === false) delete next.output; else next.output = override.output; }
 	if (override.outputMode !== undefined) next.outputMode = override.outputMode;
 	if (override.defaultReads !== undefined) { if (override.defaultReads === false) delete next.defaultReads; else next.defaultReads = [...override.defaultReads]; }
+	if (override.modelClass !== undefined) {
+		if (override.modelClass === false) {
+			delete next.modelClass;
+			delete next.modelClassSource;
+		} else {
+			next.modelClass = override.modelClass;
+			next.modelClassSource = "agent-override";
+		}
+	}
 	if (override.model !== undefined) {
 		if (override.model === false) delete next.model; else next.model = override.model;
+		delete next.modelClass;
+		delete next.modelClassSource;
 		delete next.modelSource;
 	}
 	if (override.defaultProvider !== undefined) {
 		if (override.defaultProvider === false) delete next.modelProvider;
 		else next.modelProvider = override.defaultProvider;
 	}
+	if (override.fallbackModels !== undefined) { if (override.fallbackModels === false) delete next.fallbackModels; else next.fallbackModels = [...override.fallbackModels]; }
 	if (override.fast !== undefined) next.fast = override.fast;
 	if (override.thinking !== undefined) { if (override.thinking === false) delete next.thinking; else next.thinking = override.thinking; }
 	if (override.systemPromptMode !== undefined) next.systemPromptMode = override.systemPromptMode;
@@ -1636,7 +1673,7 @@ export function applyRuntimeAgentSettings(agents: AgentConfig[], context: Runtim
 
 export function buildBuiltinOverrideConfig(
 	base: BuiltinAgentOverrideBase,
-	draft: Pick<AgentConfig, "model" | "modelProvider" | "fast" | "thinking" | "systemPromptMode" | "inheritProjectContext" | "inheritGlobalContext" | "inheritSkills" | "defaultContext" | "acceptanceRole" | "disabled" | "systemPrompt" | "skills" | "tools" | "allowNestedSubagents" | "mcpDirectTools" | "extensions" | "subagentOnlyExtensions" | "mutationTools" | "toolBudget"> & Partial<Pick<AgentConfig, "description" | "machine" | "output" | "outputMode" | "defaultReads" | "excludeTools">>,
+	draft: Pick<AgentConfig, "modelClass" | "model" | "modelProvider" | "fallbackModels" | "fast" | "thinking" | "systemPromptMode" | "inheritProjectContext" | "inheritGlobalContext" | "inheritSkills" | "defaultContext" | "acceptanceRole" | "disabled" | "systemPrompt" | "skills" | "tools" | "allowNestedSubagents" | "mcpDirectTools" | "extensions" | "subagentOnlyExtensions" | "mutationTools" | "toolBudget"> & Partial<Pick<AgentConfig, "description" | "machine" | "output" | "outputMode" | "defaultReads" | "excludeTools">>,
 ): BuiltinAgentOverrideConfig | undefined {
 	const override: BuiltinAgentOverrideConfig = {};
 	if (draft.machine !== base.machine) override.machine = draft.machine ?? false;
@@ -1648,8 +1685,10 @@ export function buildBuiltinOverrideConfig(
 	if (draft.output !== base.output) override.output = draft.output ?? false;
 	if (draft.outputMode !== undefined && draft.outputMode !== base.outputMode) override.outputMode = draft.outputMode;
 	if (!arraysEqual(draft.defaultReads, base.defaultReads)) override.defaultReads = draft.defaultReads ? [...draft.defaultReads] : false;
+	if (draft.modelClass !== base.modelClass) override.modelClass = draft.modelClass ?? false;
 	if (draft.model !== base.model) override.model = draft.model ?? false;
 	if (draft.modelProvider !== base.modelProvider) override.defaultProvider = draft.modelProvider ?? false;
+	if (!arraysEqual(draft.fallbackModels, base.fallbackModels)) override.fallbackModels = draft.fallbackModels ? [...draft.fallbackModels] : false;
 	if (draft.fast !== base.fast) override.fast = draft.fast === true;
 	if (draft.thinking !== base.thinking) override.thinking = draft.thinking ?? false;
 	if (draft.systemPromptMode !== base.systemPromptMode) override.systemPromptMode = draft.systemPromptMode;
@@ -2033,7 +2072,7 @@ function parseAgentRunnerFrontmatter(raw: string | undefined, agentName: string)
 
 function validateExternalRunnerProfile(frontmatter: Record<string, string>, agentName: string, runner: AgentRunnerConfig | undefined): void {
 	if (runner?.type !== "external-cli" && runner?.type !== "external-job") return;
-	const unsupported = ["tools", "excludeTools", "allowNestedSubagents", "allowedAgents", "model", "thinking", "extensions", "subagentOnlyExtensions", "mutationTools", "maxSubagentDepth", "skills", "skill", "skillPath", "toolBudget", "permission", "permissions"]
+	const unsupported = ["tools", "excludeTools", "allowNestedSubagents", "allowedAgents", "model", "modelClass", "fallbackModels", "thinking", "extensions", "subagentOnlyExtensions", "mutationTools", "maxSubagentDepth", "skills", "skill", "skillPath", "toolBudget", "permission", "permissions"]
 		.filter((field) => frontmatter[field] !== undefined);
 	if (unsupported.length > 0) {
 		throw new Error(`Agent '${agentName}' uses runner.type='${runner.type}' and declares unsupported Pi-only fields: ${unsupported.join(", ")}.`);
@@ -2131,7 +2170,7 @@ function loadAgentsFromDefinitionFiles(files: AgentDefinitionFile[], source: Age
 		const skillStr = frontmatter.skill || frontmatter.skills;
 		const skills = parseFrontmatterList(skillStr);
 		const skillPath = parseFrontmatterList(frontmatter.skillPath);
-		if (frontmatter.fallbackModels !== undefined) throw new Error(`Agent '${filePath}' uses removed frontmatter field 'fallbackModels'. Configure one model instead.`);
+		const fallbackModels = parseFrontmatterList(frontmatter.fallbackModels);
 		const systemPromptMode = frontmatter.systemPromptMode === "replace"
 			? "replace"
 			: frontmatter.systemPromptMode === "append"
@@ -2252,7 +2291,12 @@ function loadAgentsFromDefinitionFiles(files: AgentDefinitionFile[], source: Age
 			...(allowNestedSubagents !== undefined ? { allowNestedSubagents } : {}),
 			...(allowedAgents !== undefined ? { allowedAgents } : {}),
 			...(mcpDirectTools.length > 0 ? { mcpDirectTools } : {}),
+			...(frontmatter.modelClass !== undefined ? {
+				modelClass: parseModelClass(frontmatter.modelClass, `Agent '${localName}' modelClass frontmatter`),
+				modelClassSource: "frontmatter" as const,
+			} : {}),
 			...(frontmatter.model !== undefined ? { model: frontmatter.model } : {}),
+			...(fallbackModels?.length ? { fallbackModels } : {}),
 			...(fast !== undefined ? { fast } : {}),
 			...(frontmatter.thinking !== undefined ? { thinking: frontmatter.thinking === "false" ? false : frontmatter.thinking } : {}),
 			systemPromptMode,
@@ -2490,6 +2534,8 @@ export interface AgentDiscoveryAllResult {
 	projectChainDir: string | null;
 	userSettingsPath: string;
 	projectSettingsPath: string | null;
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
 	maxThinking?: ThinkingLevel;
 }
 
@@ -2795,6 +2841,8 @@ function configuredAgentsForScope(sources: AgentDiscoverySources, scope: AgentSc
 	projectSettings: SubagentSettings;
 	maxThinking?: ThinkingLevel;
 	modelScope?: ModelScopeConfig;
+	modelPools?: ModelPools;
+	modelPoolSources?: ModelPoolSources;
 } {
 	const { user: userSettings, project: projectSettings } = settingsForScope(sources, settingsScope);
 	const defaultProvider = resolveSubagentDefaultProvider(userSettings, projectSettings, sources.projectSettingsPath);
@@ -2803,6 +2851,7 @@ function configuredAgentsForScope(sources: AgentDiscoverySources, scope: AgentSc
 	const maxThinking = resolveSubagentMaxThinking(userSettings, projectSettings, sources.projectSettingsPath);
 	const defaultExtensions = resolveSubagentDefaultExtensions(userSettings, projectSettings, sources.projectSettingsPath);
 	const defaultSubagentOnlyExtensions = resolveSubagentDefaultSubagentOnlyExtensions(userSettings, projectSettings, sources.projectSettingsPath);
+	const mergedModelPools = mergeModelPools(userSettings.modelPools, projectSettings.modelPools, sources.userSettingsPath, sources.projectSettingsPath);
 	const applyDefaults = (agents: AgentConfig[]): AgentConfig[] => applySubagentDefaults(agents, defaultModel, defaultProvider, defaultThinking, defaultExtensions, defaultSubagentOnlyExtensions);
 	const builtin = applyBuiltinOverrides(applyDefaults(sources.builtinLoaded.agents), userSettings, projectSettings, sources.userSettingsPath, sources.projectSettingsPath);
 	const user = applyCustomAgentOverrides(
@@ -2830,6 +2879,8 @@ function configuredAgentsForScope(sources: AgentDiscoverySources, scope: AgentSc
 		projectSettings,
 		maxThinking,
 		modelScope: projectSettings.modelScope ?? userSettings.modelScope,
+		...(mergedModelPools.pools ? { modelPools: mergedModelPools.pools } : {}),
+		...(mergedModelPools.sources ? { modelPoolSources: mergedModelPools.sources } : {}),
 	};
 }
 
@@ -2877,6 +2928,8 @@ function buildEffectiveDiscovery(sources: AgentDiscoverySources, scope: AgentSco
 		scope,
 		directories: discoveryDirectories(sources, scope),
 		...(configured.modelScope !== undefined ? { modelScope: configured.modelScope } : {}),
+		...(configured.modelPools ? { modelPools: configured.modelPools } : {}),
+		...(configured.modelPoolSources ? { modelPoolSources: configured.modelPoolSources } : {}),
 		...(configured.maxThinking !== undefined ? { maxThinking: configured.maxThinking } : {}),
 	};
 }
@@ -2921,6 +2974,8 @@ function buildAllDiscovery(sources: AgentDiscoverySources, includeChains: boolea
 		projectChainDir: sources.projectChainDir,
 		userSettingsPath: sources.userSettingsPath,
 		projectSettingsPath: sources.projectSettingsPath,
+		...(configured.modelPools ? { modelPools: configured.modelPools } : {}),
+		...(configured.modelPoolSources ? { modelPoolSources: configured.modelPoolSources } : {}),
 		...(configured.maxThinking !== undefined ? { maxThinking: configured.maxThinking } : {}),
 	};
 }
@@ -2952,6 +3007,9 @@ function discoverAgentsUncached(cwd: string, scope: AgentScope, preferredModelPr
 	const defaultExtensions = resolveSubagentDefaultExtensions(userSettings, projectSettings, projectSettingsPath);
 	const defaultSubagentOnlyExtensions = resolveSubagentDefaultSubagentOnlyExtensions(userSettings, projectSettings, projectSettingsPath);
 	const modelScope = projectSettings.modelScope ?? userSettings.modelScope;
+
+	const mergedModelPools = mergeModelPools(userSettings.modelPools, projectSettings.modelPools, userSettingsPath, projectSettingsPath);
+
 	const packageSubagentPaths = collectPackageSubagentPaths(effectiveCwd, { includeUser: scope !== "project", includeProject: scope !== "user", globalNpmRoot: options.globalNpmRoot });
 	const isExcluded = agentExclusions(agentExclusionRoots(userSettingsPath, projectSettingsPath));
 	const directories: AgentDefinitionDirectoryReport[] = [reportAgentDefinitionDirectory("builtin", BUILTIN_AGENTS_DIR, BUILTIN_AGENT_DEFINITION_INSPECTION)];
@@ -2984,7 +3042,13 @@ function discoverAgentsUncached(cwd: string, scope: AgentScope, preferredModelPr
 	const packageAgents = applyCustomAgentOverrides(applyDefaults(Array.from(packageMap.values())), userSettings, projectSettings, userSettingsPath, projectSettingsPath);
 	const agents = applySubagentMaxThinking(mergeAgentsForScope(scope, userAgents, projectAgents, builtinAgents, packageAgents).filter((agent) => agent.disabled !== true), maxThinking);
 	const agentDiagnostics = [...builtinLoaded.diagnostics, ...userLoaded.flatMap((loaded) => loaded.diagnostics), ...projectLoaded.flatMap((loaded) => loaded.diagnostics), ...packageLoaded.flatMap((loaded) => loaded.diagnostics)];
-	return { agents, agentDiagnostics, projectAgentsDir, cwd: effectiveCwd, scope, directories, ...(modelScope !== undefined ? { modelScope } : {}), ...(maxThinking !== undefined ? { maxThinking } : {}) };
+	return {
+		agents, agentDiagnostics, projectAgentsDir, cwd: effectiveCwd, scope, directories,
+		...(modelScope !== undefined ? { modelScope } : {}),
+		...(mergedModelPools.pools ? { modelPools: mergedModelPools.pools } : {}),
+		...(mergedModelPools.sources ? { modelPoolSources: mergedModelPools.sources } : {}),
+		...(maxThinking !== undefined ? { maxThinking } : {}),
+	};
 }
 
 export function discoverAgents(cwd: string, scope: AgentScope, preferredModelProvider?: string, options: AgentDiscoveryOptions = {}): AgentDiscoveryResult {

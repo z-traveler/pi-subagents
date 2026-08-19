@@ -5,13 +5,15 @@ How subagents pick models, and how to change that.
 Builtin agents inherit your current Pi default model. This keeps new installs from depending on a provider you may not have configured. From there you can layer defaults and overrides:
 
 - `subagents.defaultModel` — a default for every subagent that does not set its own model.
+- `subagents.modelPools.<class>` — an ordered pool behind a semantic class such as `fast`, `medium`, or `smart`.
 - `subagents.defaultProvider` — a provider preference for bare model ids, such as `llama-3`, when multiple providers expose the same id.
+- `subagents.agentOverrides.<name>.modelClass` — route one role through a named pool.
 - `subagents.agentOverrides.<name>.model` — pin one role.
 - `subagents.agentOverrides.<name>.defaultProvider` — choose or clear the provider preference for one role.
 - `subagents.agentOverridesByProvider.<provider>.<name>` — layer role fields for the active parent provider.
 - Per-run overrides — for one launch only.
 
-Precedence, strongest first: per-run override → provider-scoped role override → `agentOverrides.<name>.model` → agent frontmatter `model` → `subagents.defaultModel` → the parent session model. A provider preference does not replace this order; it only resolves bare model ids when the active registry has more than one match. Fully qualified `provider/model` strings still win exactly.
+Precedence, strongest first: per-run `model` or `modelClass` → provider-scoped role override → ordinary role override → mapped frontmatter `modelClass` → frontmatter `model` → `subagents.defaultModel` → the parent session model. One call or override object cannot set both `model` and `modelClass`; agent frontmatter may keep both so its concrete model remains a portable fallback when a deployment has no mapping for that frontmatter class. A provider preference does not replace this order; it only resolves bare model ids when the active registry has more than one match. Fully qualified `provider/model` strings still win exactly.
 
 Each launch resolves one model. Provider errors, including HTTP 429 responses, are returned from that model rather than selecting another one. Separately, a verified compaction abort after useful progress may continue the retained child session once on the same resolved model; this lifecycle recovery preserves work and is not model fallback.
 
@@ -84,6 +86,33 @@ For a persistent role override:
 
 `subagents.defaultModel` and `subagents.defaultProvider` apply to builtin, package, user, project, and runtime-registered agents. `defaultModel` fills only agents that do not set `model` in frontmatter or in their runtime definition. `defaultProvider` is also applied to frontmatter and override models so bare ids resolve against the intended provider. Per-run model overrides and `agentOverrides.<name>.model` win over frontmatter and the global default. The same `agentOverrides` block can change `tools`, `skills`, inherited context, prompt text, or disable an agent (see [agents.md](agents.md)); matching custom-agent frontmatter is replaced for any field set by the override. Runtime-registered agents take only `model`, `defaultProvider`, `fast`, and `thinking` from `agentOverrides.<name>`; their other definition fields stay owned by the registering extension.
 
+## Named model classes and same-class failover
+
+Use lowercase kebab-case class names. Each pool is ordered; a project pool replaces the user pool with the same name as one unit rather than merging candidates.
+
+```json
+{
+  "subagents": {
+    "modelPools": {
+      "fast": ["deepseek/deepseek-v4-flash:off", "openai-codex/gpt-5.6-luna:off"],
+      "medium": ["openai-codex/gpt-5.6-terra:medium", "deepseek/deepseek-v4-pro:medium"],
+      "smart": ["openai-codex/gpt-5.6-sol:high", "anthropic/claude-fable-5:medium"]
+    },
+    "agentOverrides": {
+      "scout": { "modelClass": "fast" },
+      "worker": { "modelClass": "medium" },
+      "oracle": { "modelClass": "smart" }
+    }
+  }
+}
+```
+
+Per-run forms are `modelClass: "smart"` in structured calls/workflow children and `/run oracle[modelClass=smart] ...`. An explicit per-run or agent-override class must exist. An unmapped frontmatter class falls back to its concrete `model`/`fallbackModels`, then the normal defaults.
+
+The pool is resolved and frozen when the child launches. Status/results expose `modelRouting` with the class, source, pool digest, and candidates; retained resume uses that frozen candidate set even if settings later change.
+
+Failover stays inside the selected class. Transient/provider-unavailable failures may try the next candidate; auth, billing, and quota failures cross only to a different provider. Context-window, policy, tool, control, and unknown task failures do not fail over. A candidate is attempted at most once because Pi core already owns request-level retries. No-tool/read-only failures restart on the next candidate; workspace edits continue in the retained session; external or unknown effects block automatic failover to avoid duplicate side effects.
+
 ## Fast mode
 
 Set `fast: true` on a run, in agent frontmatter, or in `subagents.agentOverrides.<name>.fast` to request the OpenAI priority service tier for supported native OpenAI-Codex children. This can use a higher quota tier or cost more. It is off by default.
@@ -101,7 +130,25 @@ A setup that works well in practice: route agents by task shape instead of runni
 
 The routing rule: use the capability tiers (1–3) when the task is well-scoped, and the intent tier (4) when scoping or judging is the task itself.
 
-Each launch resolves one model and starts the child once. Provider, authentication, quota, rate-limit, stream, empty-response, context-overflow, and provisioning failures are returned from that attempt. To try another model, the parent or operator must issue a later explicit launch.
+Each launch resolves one model and starts the child once unless a model class or legacy `fallbackModels` entries are configured. Provider errors on a single-model launch are returned from that attempt; to try another model, the parent or operator must issue a later explicit launch. Separately, a verified compaction abort after useful progress may continue the retained child session once on the same resolved model; this lifecycle recovery preserves work and is not model fallback.
+
+Give tier-4 agents a cross-provider `modelClass` pool (or legacy `fallbackModels`) so subscription usage limits degrade gracefully instead of failing the run. Named classes and legacy concrete fallbacks use the same failure classifier and effect-safety rules. Ordinary task failures and the outer run-level `timeoutMs` / `maxRuntimeMs` deadline do not trigger fallback.
+
+Fallback uses native Pi sessions, not fresh `pi` CLI processes. Even when an exact session file is reopened, normal fallback resubmits the original task; retained history alone does not make automatic continuation after tool work safe.
+
+Example fallback configuration:
+
+```yaml
+---
+name: shaper
+description: Open-ended design/UX/product/planning agent for ambiguous tasks
+model: anthropic/claude-fable-5
+thinking: medium
+fallbackModels: openai-codex/gpt-5.5:high
+---
+```
+
+One interaction worth knowing for tier 4: forked context over an Anthropic parent transcript strips the parent's signed thinking blocks from the child session, because a thinking signature cannot be replayed into a branch. The child still runs at its requested thinking level and reasons fresh from its first turn.
 
 ## Thinking level defaults
 

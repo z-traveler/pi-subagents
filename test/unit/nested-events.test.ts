@@ -399,13 +399,26 @@ describe("nested event parsing and projection", () => {
 			state: "running",
 			startedAt: 1,
 			steps: [
-				{ agent: "worker", status: "running", model: "provider/worker", thinking: "high" },
+				{
+					agent: "worker",
+					status: "running",
+					model: "provider/worker",
+					modelRouting: {
+						modelClass: "smart",
+						source: "agent-override",
+						poolDigest: "digest",
+						candidates: ["provider/worker", "other/fallback"],
+					},
+					thinking: "high",
+				},
 			],
 		}, "/tmp/child-run", { id: "child-run", parentRunId: "parent-run", depth: 1, mode: "single", ts: 2 });
 
 		assert.equal(summary.model, "provider/worker");
 		assert.equal(summary.thinking, "high");
 		assert.equal(summary.steps?.[0]?.model, "provider/worker");
+		assert.equal(summary.steps?.[0]?.modelRouting?.modelClass, "smart");
+		assert.deepEqual(summary.steps?.[0]?.modelRouting?.candidates, ["provider/worker", "other/fallback"]);
 		assert.equal(summary.steps?.[0]?.thinking, "high");
 	});
 

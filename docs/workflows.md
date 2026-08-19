@@ -136,6 +136,7 @@ These controls are opt-in. Avoid tight hard budgets for mutation-capable workers
 
 The optional `preflight` lane hints apply only to raw scripts (`workflow: true` or a script path), not named workflows or direct child calls. They are display-only: mismatched coverage warns but never changes execution authority.
 
+
 The result is `{ ok, errors }`. Invalid scripts return a tool error and include line and column data when available. Validation checks syntax, portable nested-async rules, literal `runs.run` and `runs.all` keys and child `baseRef` values, duplicate literal keys in one `runs.all` group, direct keyed access to a known `runs.all` result, and statically clear non-JSON boundary values. It also looks up literal `agent` names in `runs.run`, `runs.all`, and `runs.lanes` children against the agents discovered for the request `cwd` and `agentScope`, and reports unknown or ambiguous names with a close match when one exists. Children with their own `cwd`, `agentScope`, or `resume`, object spreads, and names built at runtime are left to launch time. Dynamic keys and other runtime-only values are accepted without a warning. Validation does not launch children or create run artifacts. Executing a workflow runs the same agent-name check first, so an unknown literal agent fails before any child launches.
 
 ```js workflow
@@ -145,6 +146,8 @@ const reviews = await runs.all([
   { key: "tests", label: "Review test coverage", agent: "reviewer", task: "Review tests: " + scan.output }
 ]);
 return reviews.map(result => result.output);
+
+Workflow defaults and individual `runs.run`/`runs.all` children accept `modelClass` as the semantic alternative to a concrete `model`. Child values override workflow defaults; setting both on one child is rejected.
 ```
 
 ```js
