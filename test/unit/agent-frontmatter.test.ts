@@ -2196,6 +2196,29 @@ Review
 });
 
 describe("project agent directory discovery", () => {
+	it("does not use the user config container for project-scoped management", () => withTempHome((home) => {
+		const projectDir = path.join(home, "projects", "app");
+		fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
+		fs.mkdirSync(projectDir, { recursive: true });
+
+		const projectResult = handleManagementAction("create", {
+			config: { name: "fixture-agent", description: "Fixture agent", scope: "project" },
+		}, { cwd: projectDir, modelRegistry: { getAvailable: () => [] } });
+		assert.equal(projectResult.isError, false);
+
+		assert.equal(fs.existsSync(path.join(projectDir, ".pi", "agents", "fixture-agent.md")), true);
+
+		const homeResult = handleManagementAction("create", {
+			config: { name: "home-agent", description: "Home agent", scope: "project" },
+		}, { cwd: home, modelRegistry: { getAvailable: () => [] } });
+		assert.equal(homeResult.isError, true);
+		const ejectResult = handleManagementAction("eject", { agent: "reviewer", agentScope: "project" }, { cwd: home, modelRegistry: { getAvailable: () => [] } });
+		assert.equal(ejectResult.isError, true);
+
+		assert.equal(fs.existsSync(path.join(home, ".pi", "agents")), false);
+		assert.equal(fs.existsSync(path.join(home, ".pi", "chains")), false);
+	}));
+
 	it("discovers project agents from both .agents and .pi/agents", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-project-agent-dirs-"));
 		tempDirs.push(dir);

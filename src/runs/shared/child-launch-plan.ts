@@ -97,7 +97,7 @@ export function resolveStepBehavior(
 	const model = stepOverrides.model ?? agentConfig.model;
 	const modelClass = stepOverrides.modelClass ?? agentConfig.modelClass;
 	const fast = stepOverrides.fast ?? agentConfig.fast;
-	return { output, outputMode, reads, progress, skills, model, modelClass, fast };
+	return { output, outputMode, reads, progress, skills, model, ...(modelClass !== undefined ? { modelClass } : {}), fast };
 }
 
 export function resolveTaskTextForFileUpdatePolicy(task: string | undefined, originalTask?: string): string | undefined {
