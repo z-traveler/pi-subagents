@@ -847,6 +847,12 @@ function cloneOverrideValue(override: BuiltinAgentOverrideConfig): BuiltinAgentO
 	};
 }
 
+export function isUserConfigContainer(dir: string): boolean {
+	const configDir = getProjectConfigDir(dir);
+	return path.resolve(configDir) === path.resolve(path.dirname(getAgentDir()))
+		|| isDirectory(path.join(configDir, "agent"));
+}
+
 function isProjectRootCandidate(dir: string): boolean {
 	return isDirectory(getProjectConfigDir(dir)) || isDirectory(path.join(dir, ".agents"));
 }
@@ -862,8 +868,9 @@ function findProjectRootCandidates(cwd: string): string[] {
 		.map((value) => fs.realpathSync.native(value)));
 	let currentDir = cwd;
 	while (true) {
-		// ~/.pi and ~/.agents are user configuration, never an implicit project.
+		// User configuration containers are never implicit project roots.
 		if (isDirectory(currentDir) && homeDirs.has(fs.realpathSync.native(currentDir))) return roots;
+		if (isUserConfigContainer(currentDir)) return roots;
 		if (isProjectRootCandidate(currentDir)) roots.push(currentDir);
 
 		const parentDir = path.dirname(currentDir);
