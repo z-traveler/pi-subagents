@@ -15,6 +15,7 @@ import {
 	buildRuntimeName,
 	findBlockingAgentDiagnostic,
 	frontmatterNameForConfig,
+	isUserConfigContainer,
 	parsePackageName,
 	mergeBuiltinAgentOverride,
 	removeBuiltinAgentOverride,
@@ -1225,6 +1226,9 @@ export function handleCreate(params: ManagementParams, ctx: ManagementContext): 
 	const scopeRaw = cfg.scope ?? "user";
 	if (scopeRaw !== "user" && scopeRaw !== "project") return result("config.scope must be 'user' or 'project'.", true);
 	const scope = scopeRaw;
+	if (scope === "project" && isUserConfigContainer(ctx.cwd)) {
+		return result("Project scope is not available at the Pi user config container. Run from inside a project or use scope: 'user'.", true);
+	}
 	if (hasKey(cfg, "steps")) return result("Durable chain definitions were removed; use a workflow script or /prompt-workflow for repeatable workflows.", true);
 	const d = discoverCatalog(ctx);
 	const projectConfigDir = getProjectConfigDir(ctx.cwd);
@@ -1350,6 +1354,9 @@ function handleEject(params: ManagementParams, ctx: ManagementContext): AgentToo
 	const parsedScope = actionScope(params.agentScope, "eject");
 	if (parsedScope.error) return parsedScope.error;
 	const scope = parsedScope.scope!;
+	if (scope === "project" && isUserConfigContainer(ctx.cwd)) {
+		return result("Project scope is not available at the Pi user config container. Run from inside a project or use agentScope: 'user'.", true);
+	}
 	const d = discoverCatalog(ctx);
 	const source = [...d.package, ...d.builtin].find((a) => a.name === raw || a.name === sanitized);
 	if (!source) {
