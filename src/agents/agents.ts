@@ -621,6 +621,12 @@ function cloneOverrideValue(override: BuiltinAgentOverrideConfig): BuiltinAgentO
 	};
 }
 
+export function isUserConfigContainer(dir: string): boolean {
+	const configDir = getProjectConfigDir(dir);
+	return path.resolve(configDir) === path.resolve(path.dirname(getAgentDir()))
+		|| isDirectory(path.join(configDir, "agent"));
+}
+
 function isProjectRootCandidate(dir: string): boolean {
 	return isDirectory(getProjectConfigDir(dir)) || isDirectory(path.join(dir, ".agents"));
 }
@@ -629,6 +635,7 @@ function findProjectRootCandidates(cwd: string): string[] {
 	const roots: string[] = [];
 	let currentDir = cwd;
 	while (true) {
+		if (isUserConfigContainer(currentDir)) return roots;
 		if (isProjectRootCandidate(currentDir)) roots.push(currentDir);
 
 		const parentDir = path.dirname(currentDir);
