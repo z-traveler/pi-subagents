@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -531,5 +532,113 @@ Leader prompt.
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 		fs.rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("does not propagate the named main-agent prompt into a different subagent", () => {
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-main-agent-child-"));
+	const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-main-agent-project-"));
+	try {
+		fs.mkdirSync(path.join(agentDir, "agents"), { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "agents", "leader.md"), `---
+name: leader
+description: Coordinates work
+tools: read, subagent
+systemPromptMode: replace
+---
+
+LEADER_ONLY_PROMPT_MARKER
+`, "utf-8");
+		fs.writeFileSync(path.join(agentDir, "agents", "worker.md"), `---
+name: worker
+description: Performs focused work
+tools: read
+systemPromptMode: replace
+completionGuard: false
+---
+
+WORKER_ONLY_PROMPT_MARKER
+`, "utf-8");
+
+		const script = String.raw`
+			import assert from "node:assert/strict";
+			import registerSubagentExtension from "./index.ts";
+			import { createMockPi } from "./test/support/helpers.ts";
+
+			const mockPi = createMockPi();
+			mockPi.install();
+			mockPi.onCall({ output: "done" });
+			const handlers = new Map();
+			const activeTools = [];
+			let subagentTool;
+			const events = { on() { return () => {}; }, emit() {} };
+			const pi = new Proxy({
+				events,
+				registerFlag() {},
+				getFlag(name) { return name === "agent" ? "leader" : undefined; },
+				on(name, handler) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
+				registerTool(tool) { if (tool.name === "subagent") subagentTool = tool; },
+				registerCommand() {}, registerShortcut() {}, registerMessageRenderer() {}, sendMessage() {},
+				getAllTools() { return ["read", "bash", "write", "edit", "grep", "find", "ls", "subagent"].map((name) => ({ name })); },
+				getActiveTools() { return activeTools; },
+				setActiveTools(names) { activeTools.splice(0, activeTools.length, ...names); },
+				appendEntry() {},
+				getSessionName() { return undefined; },
+			}, { get(target, property) { return property in target ? target[property] : () => undefined; } });
+			const model = { provider: "mock", id: "test-model", reasoning: true };
+			const ctx = {
+				cwd: ${JSON.stringify(projectDir)},
+				hasUI: false,
+				ui: {},
+				model,
+				modelRegistry: {
+					getAvailable() { return [model]; },
+					find(provider, id) { return provider === model.provider && id === model.id ? model : undefined; },
+				},
+				sessionManager: {
+					getSessionId() { return "named-main-agent-parent"; },
+					getSessionFile() { return null; },
+					getEntries() { return []; },
+				},
+			};
+
+			try {
+				registerSubagentExtension(pi);
+				for (const handler of handlers.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
+				let parentPrompt = "Pi base prompt.";
+				for (const handler of handlers.get("before_agent_start") ?? []) {
+					const result = await handler({ systemPrompt: parentPrompt }, ctx);
+					if (result?.systemPrompt) parentPrompt = result.systemPrompt;
+				}
+				assert.match(parentPrompt, /LEADER_ONLY_PROMPT_MARKER/);
+				assert.ok(subagentTool, "subagent tool was not registered");
+				const result = await subagentTool.execute(
+					"named-main-agent-child",
+					{ agent: "worker", task: "Inspect the assigned input.", async: false, context: "fresh", acceptance: false },
+					new AbortController().signal,
+					undefined,
+					ctx,
+				);
+				assert.notEqual(result.isError, true, JSON.stringify(result.content));
+				assert.equal(mockPi.sessions.length, 1);
+				const launch = mockPi.sessions[0].launch;
+				const childPrompt = launch.systemPrompt ?? launch.appendSystemPrompt ?? "";
+				assert.match(childPrompt, /WORKER_ONLY_PROMPT_MARKER/);
+				assert.doesNotMatch(childPrompt, /LEADER_ONLY_PROMPT_MARKER/);
+			} finally {
+				for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, ctx);
+				mockPi.uninstall();
+			}
+		`;
+		const env = { ...process.env, PI_CODING_AGENT_DIR: agentDir };
+		delete env.PI_SUBAGENT_CHILD;
+		execFileSync(
+			process.execPath,
+			["--experimental-strip-types", "--import", "./test/support/register-loader.mjs", "--input-type=module", "--eval", script],
+			{ cwd: projectRoot, env, stdio: "pipe" },
+		);
+	} finally {
+		fs.rmSync(agentDir, { recursive: true, force: true });
+		fs.rmSync(projectDir, { recursive: true, force: true });
 	}
 });
