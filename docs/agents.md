@@ -33,6 +33,18 @@ Discovery notes:
 - Use `agentScope: "user" | "project" | "both"` to control discovery. `both` is the default, and project definitions win runtime-name collisions.
 - When the session declined Pi project trust, discovery ignores project agents and chains, packages installed for the project or declared in its `package.json`, and project subagent settings, so `both` behaves as `user` and an explicit `project` scope is rejected.
 
+## Named main agents
+
+An agent definition can also configure the interactive main session:
+
+```bash
+pi --agent leader
+```
+
+The flag uses normal agent discovery, precedence, and aliases. The selected agent remains available to the `subagent` tool, and its name is restored with the session on `/resume` or `/reload`.
+
+For the main session, the definition applies `model`, `thinking`, `tools`, `mcpDirectTools`, `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, `skills`, `skillPath`, and `memory`. Child-only launch controls such as `async`, `timeoutMs`, `turnBudget`, `acceptance`, `output`, and `subagentOnlyExtensions` still apply only when the agent runs as a subagent.
+
 ## Builtin agents
 
 Builtins load at the lowest priority, so a user or project agent with the same name overrides them. They do not pin a provider model; they inherit your current Pi default model unless you set `subagents.defaultModel` or `subagents.agentOverrides.<name>.model` (see [models.md](models.md)).
