@@ -1051,10 +1051,11 @@ describe("native subagent fleet", () => {
 			);
 			try {
 				const lines = component.render(100);
+				const renderedDetailWithoutWrapBoundaries = lines.map((line) => line.split("│")[2] ?? "").join("");
 				assert.ok(lines.some((line) => line.includes("FINAL ASYNC OUTPUT")));
-				assert.ok(lines.some((line) => line.includes("output-0.log")));
+				assert.ok(renderedDetailWithoutWrapBoundaries.includes("output-0.log"));
 				assert.ok(lines.some((line) => line.includes("worker") && line.includes("[fork]")));
-				assert.ok(lines.some((line) => line.includes("worker.jsonl")));
+				assert.ok(renderedDetailWithoutWrapBoundaries.includes("worker.jsonl"));
 				for (const line of lines) assert.ok(visibleWidth(line) <= 100, `line exceeded width: ${line}`);
 				tui.terminal.rows = 10;
 				assert.ok(component.render(100).length <= 8, "short-terminal render should fit the overlay's 85% height cap");
