@@ -128,9 +128,7 @@ describe("native supervisor channel", () => {
 			let measuring = true;
 			fsDefault.readdirSync = ((dir: fs.PathLike, options: unknown) => {
 				const dirPath = String(dir);
-				// Recursive fixture cleanup also calls readdirSync, but always with
-				// directory paths. Count only request-mailbox reads.
-				if (measuring && path.basename(dirPath) === "requests") {
+				if (measuring) {
 					assert.equal(dirPath, path.join(ownDir, "requests"), "coordinators must not scan unrelated retained channels");
 					scans++;
 				}
