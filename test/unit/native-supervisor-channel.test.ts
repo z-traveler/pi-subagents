@@ -125,9 +125,15 @@ describe("native supervisor channel", () => {
 			});
 			const readdir = fsDefault.readdirSync;
 			let scans = 0;
+			let measuring = true;
 			fsDefault.readdirSync = ((dir: fs.PathLike, options: unknown) => {
-				assert.equal(String(dir), path.join(ownDir, "requests"), "coordinators must not scan unrelated retained channels");
-				scans++;
+				const dirPath = String(dir);
+				// Recursive fixture cleanup also calls readdirSync, but always with
+				// directory paths. Count only request-mailbox reads.
+				if (measuring && path.basename(dirPath) === "requests") {
+					assert.equal(dirPath, path.join(ownDir, "requests"), "coordinators must not scan unrelated retained channels");
+					scans++;
+				}
 				return (readdir as (dir: fs.PathLike, options: unknown) => unknown)(dir, options);
 			}) as typeof fsDefault.readdirSync;
 			syncBuiltinESMExports();
@@ -150,9 +156,10 @@ describe("native supervisor channel", () => {
 				assert.equal(tick, undefined, "finished descendants stop polling on every platform");
 				assert.equal(scans, scansBeforeIdle);
 			} finally {
-				channel.dispose();
+				measuring = false;
 				fsDefault.readdirSync = readdir;
 				syncBuiltinESMExports();
+				channel.dispose();
 			}
 		});
 	}
