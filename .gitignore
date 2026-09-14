@@ -8,6 +8,9 @@ dist-pkg/
 .fallow/
 tmp/
 
+# Local-only files
+*.local.*
+
 # Fallback ignores for local ad-hoc agent and lane reports.
 /memory.md
 /todo.md
