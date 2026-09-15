@@ -51,7 +51,7 @@ describe("model-class failover E2E", () => {
 		assert.equal(mockPi.callCount(), 2);
 	});
 
-	it("skips same-provider candidates after an auth failure", async () => {
+	it("tries the next same-provider candidate after an auth failure", async () => {
 		mockPi.onCall({
 			jsonl: [{
 				type: "message_end",
@@ -65,7 +65,7 @@ describe("model-class failover E2E", () => {
 			}],
 			exitCode: 1,
 		});
-		mockPi.onCall({ output: "other provider completed" });
+		mockPi.onCall({ output: "same gateway fallback completed" });
 		const candidates = ["provider-a/primary", "provider-a/secondary", "provider-b/fallback"];
 
 		const result = await runSync(process.cwd(), [makeAgent("worker")], "worker", "Complete the auth smoke task.", {
@@ -75,9 +75,9 @@ describe("model-class failover E2E", () => {
 		});
 
 		assert.equal(result.exitCode, 0);
-		assert.equal(result.model, "provider-b/fallback");
-		assert.deepEqual(result.attemptedModels, ["provider-a/primary", "provider-b/fallback"]);
-		assert.deepEqual(result.modelAttempts?.[0]?.skippedModels, ["provider-a/secondary"]);
+		assert.equal(result.model, "provider-a/secondary");
+		assert.deepEqual(result.attemptedModels, ["provider-a/primary", "provider-a/secondary"]);
+		assert.equal(result.modelAttempts?.[0]?.skippedModels, undefined);
 		assert.equal(result.modelAttempts?.[0]?.failureCategory, "failure-domain");
 		assert.equal(mockPi.callCount(), 2);
 	});
