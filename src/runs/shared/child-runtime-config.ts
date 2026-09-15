@@ -6,6 +6,7 @@ import type { ChildWatchdogConfig, ChildWatchdogStatusEvent } from "../../watchd
 import type { ResolvedWaitToolConfig } from "../background/wait-config.ts";
 import type { ChildToolDiagnostic } from "./tool-availability.ts";
 import type { ResolvedSubagentCapabilityCeiling } from "./capability-ceiling.ts";
+import type { SessionFastModePolicy } from "./session-fast-mode.ts";
 
 /**
  * Set in processes that host child sessions (the async runner). The extension
@@ -95,6 +96,8 @@ export interface ChildRuntimeConfig {
 	toolDiagnostic?: (diagnostic: ChildToolDiagnostic | undefined) => void;
 	/** Receives the runtime-acknowledged extension ids when the child run ends. */
 	runtimeAcknowledgements?: (ids: string[]) => void;
+	/** Live Session Fast policy shared by native descendants in this host process. */
+	sessionFastMode?: SessionFastModePolicy;
 	fast: boolean;
 }
 

@@ -10,6 +10,7 @@ import type { ChildSessionLaunch } from "./child-session.ts";
 import type { ArbiterModelContext } from "./llm-intent-arbiter.ts";
 import type { ChildTranscriptWriter } from "../../shared/child-transcript.ts";
 import { projectRuntimeAcknowledgedExtensions } from "./runtime-acknowledged-extensions.ts";
+import type { SessionFastModePolicy } from "./session-fast-mode.ts";
 
 /** Inline extension shape accepted by pi's resource loader (`extensionFactories`). */
 export interface ChildHookExtension {
@@ -120,15 +121,15 @@ export function captureReadonlyChildDrain(hooks: ChildHookExtension[]): (() => b
 
 /**
  * The child-side hooks pi-subagents installs in every child, keyed off the
- * launch config. The registrations live in `subagent-prompt-runtime.ts`,
- * `fast-mode-extension.ts`, and `fanout-child.ts`.
+ * launch config. Prompt, Launch Fast, and fanout registrations live in their
+ * dedicated modules; the live Session Fast hook is installed here.
  */
-export function createChildHooks(config: ChildRuntimeConfig): ChildHookExtension[] {
-	return childHooks(config);
+export function createChildHooks(config: ChildRuntimeConfig, sessionFastMode?: SessionFastModePolicy): ChildHookExtension[] {
+	return childHooks(config, undefined, undefined, sessionFastMode);
 }
 
 /** Launch-owned bookkeeping, paired with the same private hook certificate (no callback registration API). */
-export function createCapturedChildHooks(config: ChildRuntimeConfig, runner = false) {
+export function createCapturedChildHooks(config: ChildRuntimeConfig, runner = false, sessionFastMode?: SessionFastModePolicy) {
 	let diagnostic: ChildToolDiagnostic | undefined;
 	let acknowledgedIds: string[] | undefined;
 	let completionIntentContext: ArbiterModelContext | undefined;
@@ -138,7 +139,7 @@ export function createCapturedChildHooks(config: ChildRuntimeConfig, runner = fa
 		runtimeAcknowledgements: (ids) => { acknowledgedIds = ids; },
 	};
 	Object.assign(config, capture);
-	const hooks = childHooks(config, capture, (held) => { finalDrainHeld = held; });
+	const hooks = childHooks(config, capture, (held) => { finalDrainHeld = held; }, sessionFastMode);
 	if (runner) {
 		hooks.push({ name: "pi-subagents:completion-intent", factory: (pi) => pi.on("session_start", (_event, childCtx) => {
 			// Retain only attempt model services and the session id string, not the live child session.
@@ -160,7 +161,7 @@ export function createCapturedChildHooks(config: ChildRuntimeConfig, runner = fa
 	};
 }
 
-function childHooks(config: ChildRuntimeConfig, capture?: OwnedCapture, holdFinalDrain?: (held: boolean) => void): ChildHookExtension[] {
+function childHooks(config: ChildRuntimeConfig, capture?: OwnedCapture, holdFinalDrain?: (held: boolean) => void, sessionFastMode?: SessionFastModePolicy): ChildHookExtension[] {
 	const snapshot = readonlyConfig(config, capture);
 	const proof: PromptProof | undefined = snapshot === undefined ? undefined : { config, snapshot, capture };
 	const runtime = Object.create(config) as ChildRuntimeConfig;
@@ -170,6 +171,9 @@ function childHooks(config: ChildRuntimeConfig, capture?: OwnedCapture, holdFina
 	}
 	if (holdFinalDrain) {
 		Object.defineProperty(runtime, "holdFinalDrain", { configurable: true, enumerable: true, writable: true, value: holdFinalDrain });
+	}
+	if (sessionFastMode) {
+		Object.defineProperty(runtime, "sessionFastMode", { configurable: true, value: sessionFastMode });
 	}
 	const hooks: ChildHookExtension[] = [
 		{ name: "pi-subagents:prompt-runtime", factory: function promptRuntime(pi) {
@@ -184,6 +188,10 @@ function childHooks(config: ChildRuntimeConfig, capture?: OwnedCapture, holdFina
 		promptProofs.set(hooks[0]!.factory, proof);
 	}
 	if (config.fast) hooks.push({ name: "pi-subagents:fast-mode", factory: (pi) => registerSubagentFastModeExtension(pi) });
+	if (sessionFastMode) hooks.push({
+		name: "pi-subagents:session-fast-mode",
+		factory: (pi) => pi.on("before_provider_request", (event, ctx) => sessionFastMode.rewriteProviderRequest(event.payload, ctx.model?.id)),
+	});
 	if (config.fanoutChild) hooks.push({ name: "pi-subagents:fanout-child", factory: (pi) => registerFanoutChildSubagentExtension(pi, runtime) });
 	return hooks;
 }

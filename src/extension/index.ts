@@ -37,6 +37,7 @@ import { SubagentFleetStatus, resolveFleetViewPlacement } from "../tui/fleet-sta
 import { createSubagentParamsSchema } from "./schemas.ts";
 import { createSubagentExecutor, type SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
 import { createAsyncJobTracker } from "../runs/background/async-job-tracker.ts";
+import { writeSessionFastModeSnapshot } from "../runs/background/control-channel.ts";
 import { getActiveAsyncCapacitySnapshot, resolveAbandonedSlotReleaseAfterMs, resolveMaxActiveAsyncRunsPerSession } from "../runs/background/active-async-capacity.ts";
 import { cleanupResultIndexes, missionObserverResultCandidateFiles } from "../runs/background/result-files.ts";
 import { ASYNC_RETENTION_DELAY_MS, cleanupAsyncRetention } from "../runs/background/async-retention.ts";
@@ -74,6 +75,8 @@ import { formatDuration, shortenPath } from "../shared/formatters.ts";
 import { applyModelExclusionsConfig, loadConfig, resolveAsyncByDefault, resolveScheduledStoreRoot } from "./config.ts";
 import { buildSubagentToolDescription, buildSubagentToolPromptMetadata } from "./tool-description.ts";
 import { formatWorkflowPreflightSummary, normalizeWorkflowPreflight } from "../workflows/workflow-preflight.ts";
+import { registerSessionFastMode } from "./session-fast-mode.ts";
+import type { SessionFastModeSnapshot } from "../runs/shared/session-fast-mode.ts";
 import { finalizeToolResult } from "./tool-result.ts";
 import { collectGoalContinuationNotices } from "../missions/goal-driver.ts";
 import { restoreForegroundRunHistory } from "../runs/foreground/foreground-history.ts";
@@ -501,6 +504,17 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			clear: () => {},
 		},
 	};
+	const broadcastSessionFastMode = (snapshot: SessionFastModeSnapshot): void => {
+		for (const job of state.asyncJobs.values()) {
+			if (job.status !== "queued" && job.status !== "running") continue;
+			try {
+				writeSessionFastModeSnapshot(job.asyncDir, snapshot);
+			} catch (error) {
+				console.error(`Failed to update Session Fast mode for async run '${job.asyncId}':`, error);
+			}
+		}
+	};
+	const sessionFastMode = registerSessionFastMode(pi, config.fastMode?.models ?? [], { onChange: broadcastSessionFastMode });
 	const withLastUiContext = <T>(run: (ctx: ExtensionContext) => T): T | undefined => {
 		const cached = state.lastUiContext;
 		return withCachedUiContext(cached, () => {
@@ -651,6 +665,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		findPendingAsks: (target) => supervisorChannel.findPendingAsks(target),
 		refreshResultDelivery: () => refreshResultDelivery(),
 		trackRetainedNestedRoute: undefined,
+		sessionFastMode,
 	};
 	const executor = createSubagentExecutor(executorDeps);
 	executorScheduled = executor.executeScheduled;
@@ -885,6 +900,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	};
 	const asyncStartedHandler = (payload: unknown) => {
 		handleStarted(payload);
+		broadcastSessionFastMode(sessionFastMode.snapshot());
 		supervisorChannel.activateTransport();
 		refreshResultDelivery();
 		fleetStatus?.refresh();
@@ -916,6 +932,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		state.lastUiContext = ctx;
 		const activeJobCount = state.asyncJobs.size;
 		restoreActiveJobs(ctx);
+		broadcastSessionFastMode(sessionFastMode.snapshot());
 		if (state.asyncJobs.size > activeJobCount) herdrStatusBridge.syncRuns();
 		fleetStatus?.setContext(ctx);
 		fleetStatus?.refresh();
@@ -1017,6 +1034,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		logSlowPhase("foreground-history", phaseStartedAt);
 		phaseStartedAt = Date.now();
 		restoreActiveJobs(ctx);
+		broadcastSessionFastMode(sessionFastMode.snapshot());
 		logSlowPhase("active-job-restore", phaseStartedAt);
 		phaseStartedAt = Date.now();
 		scheduledRunManager.bindSession(ctx);

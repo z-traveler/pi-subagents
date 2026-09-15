@@ -1,0 +1,58 @@
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SessionFastModePolicy, type SessionFastModeSnapshot } from "../runs/shared/session-fast-mode.ts";
+
+export const SESSION_FAST_MODE_ENTRY_TYPE = "pi-subagents:session-fast-mode";
+
+function restoredSessionFastMode(ctx: ExtensionContext): boolean {
+	const branch = ctx.sessionManager.getBranch();
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry?.type !== "custom" || entry.customType !== SESSION_FAST_MODE_ENTRY_TYPE) continue;
+		// SAFETY: session entries are untrusted; enabled is validated below before use.
+		const enabled = (entry.data as { enabled?: unknown } | undefined)?.enabled;
+		if (typeof enabled === "boolean") return enabled;
+	}
+	return false;
+}
+
+function formatStatus(policy: SessionFastModePolicy, modelId: string | undefined): string {
+	const mode = policy.enabled ? "on" : "off";
+	if (!modelId) return `Fast mode: ${mode}.`;
+	return `Fast mode: ${mode}; current model ${modelId} is ${policy.isEligible(modelId) ? "eligible" : "not eligible"}.`;
+}
+
+export function registerSessionFastMode(
+	pi: ExtensionAPI,
+	modelIds: readonly string[],
+	options: { onChange?: (snapshot: SessionFastModeSnapshot) => void } = {},
+): SessionFastModePolicy {
+	const policy = new SessionFastModePolicy(modelIds);
+
+	pi.on("session_start", (_event, ctx) => {
+		policy.setEnabled(restoredSessionFastMode(ctx));
+	});
+	pi.on("before_provider_request", (event, ctx) => policy.rewriteProviderRequest(event.payload, ctx.model?.id));
+	pi.registerCommand("fast", {
+		description: "Toggle Session Fast routing, or set it with /fast on|off|status",
+		handler: async (args, ctx) => {
+			const command = args.trim();
+			if (command && command !== "on" && command !== "off" && command !== "status") {
+				ctx.ui.notify("Usage: /fast [on|off|status]", "error");
+				return;
+			}
+			if (command === "status") {
+				ctx.ui.notify(formatStatus(policy, ctx.model?.id), "info");
+				return;
+			}
+			const enabled = command === "on" ? true : command === "off" ? false : !policy.enabled;
+			if (enabled !== policy.enabled) {
+				policy.setEnabled(enabled);
+				pi.appendEntry(SESSION_FAST_MODE_ENTRY_TYPE, { enabled });
+				options.onChange?.(policy.snapshot());
+			}
+			ctx.ui.notify(formatStatus(policy, ctx.model?.id), "info");
+		},
+	});
+
+	return policy;
+}

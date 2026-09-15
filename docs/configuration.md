@@ -60,6 +60,24 @@ For a native Pi `model_verification_failed` where your proxy accepts `claude-hai
 
 Replace `YOUR_PROVIDER` with the resolved Pi provider ID. Keep the outgoing model alias unchanged. This native remedy already exists in v0.65.1; it does not infer equivalence from provider prefixes or dates. The built-in external `claude-code` adapter does not invoke this verifier or use this setting. If an external run shows this diagnostic, identify the installed version, resolved runner kind/adapter, and error location before applying a native remedy. Thanks to [sixtus](https://github.com/sixtus) for the concrete request-ID/response-ID example in [#1922](https://github.com/nicobailon/pi-subagents/issues/1922).
 
+## `fastMode`
+
+In `~/.pi/agent/extensions/subagent/config.json`:
+
+```json
+{
+  "fastMode": {
+    "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+  }
+}
+```
+
+`models` is the exact, case-sensitive allowlist for the root session's `/fast` command. Matching uses Pi's current `model.id` and ignores the provider, so the same listed ID is eligible through any provider. IDs may contain `/`; no provider prefix is added or removed, and there is no fuzzy or family matching. Invalid, empty, or whitespace-padded entries fail config loading.
+
+Session Fast is off by default. `/fast` toggles it; `/fast on`, `/fast off`, and `/fast status` are also supported. When enabled on an eligible native Pi model, it adds or overwrites only `service_tier: "priority"` in the next provider request. It does not change the request's model, call `setModel`, or require a particular provider. State follows the active session branch and propagates to native foreground, background, resumed, and nested children; external CLI and external-job runners are unaffected.
+
+This setting is independent of the per-launch `fast: true` option and the semantic `subagents.modelPools.fast` pool. `/fast off` does not disable a child's separately configured Launch Fast option.
+
 ## `modelExclusions`
 
 ```json

@@ -4,6 +4,7 @@ import { buildInProcessChildLaunch, type BuildInProcessChildLaunchInput, type In
 import { deriveForkPromptCacheKey } from "../shared/child-tool-plan.ts";
 import { normalizeExtensionBindings } from "../shared/extension-bindings.ts";
 import type { RunnerSubagentStep } from "../shared/parallel-utils.ts";
+import type { SessionFastModePolicy } from "../shared/session-fast-mode.ts";
 import { formatAcceptancePrompt } from "../shared/acceptance.ts";
 import { isAgentContract } from "../shared/agent-contract.ts";
 
@@ -18,6 +19,7 @@ export interface RunnerChildLaunchContext {
 	runFanoutBudget?: BuildInProcessChildLaunchInput["runFanoutBudget"];
 	capabilityCeiling?: BuildInProcessChildLaunchInput["capabilityCeiling"];
 	inheritedChildRuntime?: InheritedChildRuntime;
+	sessionFastMode?: SessionFastModePolicy;
 	hostAvailableBuiltins?: readonly string[];
 }
 
@@ -51,6 +53,7 @@ export function buildRunnerChildLaunch(step: RunnerSubagentStep, ctx: RunnerChil
 		extensions: step.extensions,
 		subagentOnlyExtensions: step.subagentOnlyExtensions,
 		fast: step.fast,
+		sessionFastMode: ctx.sessionFastMode,
 		modelCandidates: step.modelCandidates,
 		systemPrompt: acceptancePrompt ? `${step.systemPrompt ?? ""}\n${acceptancePrompt}` : step.systemPrompt ?? "",
 		systemPromptMode: step.systemPromptMode,

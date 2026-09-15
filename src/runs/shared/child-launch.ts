@@ -35,6 +35,7 @@ import { createCapturedChildHooks, withChildSessionErrorReporting } from "./chil
 import type { ChildTranscriptWriter } from "../../shared/child-transcript.ts";
 import type { ChildSessionLaunch, ChildSessionStorage } from "./child-session.ts";
 import type { ArbiterModelContext } from "./llm-intent-arbiter.ts";
+import type { SessionFastModePolicy } from "./session-fast-mode.ts";
 
 /** Environment variable pi-mcp-adapter reads for the tools a child may expose. */
 export const MCP_DIRECT_TOOLS_ENV = "MCP_DIRECT_TOOLS";
@@ -90,6 +91,7 @@ export interface BuildInProcessChildLaunchInput {
 	runFanoutBudget?: RunFanoutBudgetDescriptor;
 	structuredOutput?: StructuredOutputRuntime;
 	fast?: boolean;
+	sessionFastMode?: SessionFastModePolicy;
 	modelCandidates?: readonly string[];
 	toolBudget?: ResolvedToolBudget;
 	permissionRules?: PermissionRules;
@@ -280,7 +282,7 @@ export function buildInProcessChildLaunch(input: BuildInProcessChildLaunchInput)
 		...(toolPlan.effectiveMcpTools.length > 0 ? { mcpDirectTools: toolPlan.effectiveMcpTools } : {}),
 		fast: input.fast === true,
 	};
-	const capturedHooks = createCapturedChildHooks(config, input.host === "runner");
+	const capturedHooks = createCapturedChildHooks(config, input.host === "runner", input.sessionFastMode);
 
 	const extensionPaths = toolPlan.extensionArgs.filter((extensionPath) => !isSubagentRuntimeExtensionPath(extensionPath));
 	const ambientExtensions = input.host === "runner" && !toolPlan.disableAmbientExtensions;

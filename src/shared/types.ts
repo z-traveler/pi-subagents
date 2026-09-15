@@ -2380,6 +2380,8 @@ export interface RunSyncOptions {
 	childSessionFactory?: import("../runs/shared/child-session.ts").ChildSessionFactory;
 	/** The launching executor's own child runtime when it is itself an in-process child. */
 	childRuntime?: import("../runs/shared/child-runtime-config.ts").ChildRuntimeConfig;
+	/** Live root-session Fast policy for native in-process children. */
+	sessionFastMode?: import("../runs/shared/session-fast-mode.ts").SessionFastModePolicy;
 	/** Fires once the child session exists and can be steered. */
 	onChildSession?: (controls: ForegroundChildSessionControls) => void;
 	/** Opt-in global permission rules; missing tools remain allowed. */
@@ -2536,6 +2538,11 @@ export interface ModelExclusionsConfig {
 	defaultTtlMs?: number;
 }
 
+export interface SessionFastModeConfig {
+	/** Exact provider-independent model IDs eligible for the priority service tier. */
+	models?: string[];
+}
+
 export type FleetViewPlacement = "aboveEditor" | "belowEditor";
 
 export const FLEET_KEYBINDING_ACTIONS = [
@@ -2600,6 +2607,8 @@ export interface ExtensionConfig {
 	asyncWidget?: boolean;
 	/** Configure the process-wide TTL policy for persisted model exclusions. */
 	modelExclusions?: ModelExclusionsConfig;
+	/** Configure root-session Fast routing by exact provider-independent model ID. */
+	fastMode?: SessionFastModeConfig;
 	/** Exact provider/model candidates mapped to operator-declared equivalent response IDs. Empty arrays add no accepted IDs. */
 	modelResponseAliases?: Record<string, string[]>;
 	/** Tool description variant registered for the parent-facing subagent tool. Defaults to split metadata. */

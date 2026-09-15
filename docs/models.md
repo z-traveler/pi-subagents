@@ -145,11 +145,31 @@ The hard rolling window is 20 seconds and the soft rolling window is 30 seconds.
 
 The interactive main agent is advisory-only: pi-subagents never aborts or changes its model. When a response is slow, Pi displays a UI-only card. If the current provider/model maps (ignoring thinking level) to exactly one configured class, the card recommends another candidate from that class and may probe alternatives for future routing; otherwise it shows a generic warning. The card is not inserted into model context.
 
-## Fast mode
+## Launch Fast (`fast: true`)
 
-Set `fast: true` on a run, in agent frontmatter, or in `subagents.agentOverrides.<name>.fast` to request the OpenAI priority service tier for supported native OpenAI-Codex children. This can use a higher quota tier or cost more. It is off by default.
+Set `fast: true` on a run, in agent frontmatter, or in `subagents.agentOverrides.<name>.fast` to request the OpenAI priority service tier for that native OpenAI-Codex child launch. This can use a higher quota tier or cost more. It is off by default.
 
-Fast mode fails before launch unless every resolved model candidate is on the allowlist. The current allowlist is `openai-codex/gpt-5.6-luna` and `openai-codex/gpt-5.6-sol`. External runners, Anthropic models, and other providers do not use fast mode.
+Launch Fast fails before launch unless every resolved model candidate is on the allowlist. The current allowlist is `openai-codex/gpt-5.6-luna` and `openai-codex/gpt-5.6-sol`. External runners, Anthropic models, and other providers do not use Launch Fast.
+
+## Session Fast (`/fast`)
+
+Session Fast requests `service_tier: "priority"` without changing the logical model or provider route. Configure eligible exact model IDs in the extension config (see [configuration.md](configuration.md)):
+
+```json
+{
+  "fastMode": {
+    "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+  }
+}
+```
+
+Eligibility uses `model.id` only and is provider-independent. Matching is exact and case-sensitive; there is no suffix, family, or fuzzy matching. An ID may itself contain `/`. The `fast` semantic model-pool name is unrelated.
+
+The mode is off by default. `/fast` toggles it, `/fast on` and `/fast off` set it explicitly, and `/fast status` reports both the session state and whether the current model is eligible. The state is stored on the active session branch, so resume, reload, and fork restore the last branch value.
+
+Changes apply to the next provider request made by the root agent or any native foreground, background, resumed, or nested Pi child in that session. An in-flight request is unchanged. Unsupported models remain on their normal service tier. External CLI and external-job runners are unaffected.
+
+Session Fast and Launch Fast are independent. They may both write the same priority tier; `/fast off` stops only Session Fast and does not disable a child's `fast: true` launch option.
 
 ## Recommended model tiering (optional)
 

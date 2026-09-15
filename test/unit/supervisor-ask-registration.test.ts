@@ -755,6 +755,7 @@ describe("supervisor ask registration", () => {
 					sessionManager: {
 						getSessionId() { if (stale) throw new Error("stale session manager"); return owner; },
 						getSessionFile() { return sessionFile; }, getEntries() { return []; },
+						getBranch() { return []; },
 					},
 					modelRegistry: { getAvailable() { return []; } },
 				};

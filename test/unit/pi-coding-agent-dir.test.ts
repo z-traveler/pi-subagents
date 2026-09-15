@@ -292,6 +292,18 @@ Package skill content.
 		assert.throws(() => updateConfig((config) => config), /config\.defaultSubagentContext must be "fresh" or "fork"/);
 	});
 
+	it("loads exact provider-independent Fast model IDs and rejects malformed policy", () => {
+		const configPath = path.join(agentDir, "extensions", "subagent", "config.json");
+		const fastMode = { models: ["gpt-5.6-sol", "owner/model"] };
+		writeFile(configPath, JSON.stringify({ fastMode }));
+		assert.deepEqual(loadConfig().fastMode, fastMode);
+
+		for (const value of [null, [], { models: "gpt-5.6-sol" }, { models: [""] }, { models: [" gpt-5.6-sol"] }]) {
+			writeFile(configPath, JSON.stringify({ fastMode: value }));
+			assert.throws(() => loadConfig(), /config\.fastMode/);
+		}
+	});
+
 	it("loads exact model response aliases and preserves them during config updates", () => {
 		const configPath = path.join(agentDir, "extensions", "subagent", "config.json");
 		const modelResponseAliases = {

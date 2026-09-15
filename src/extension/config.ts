@@ -108,6 +108,16 @@ function validateModelExclusionsConfig(value: unknown): void {
 	}
 }
 
+function validateFastModeConfig(value: unknown): void {
+	if (value === undefined) return;
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("config.fastMode must be a JSON object");
+	const models = (value as Record<string, unknown>).models;
+	if (models === undefined) return;
+	if (!Array.isArray(models) || models.some((model) => typeof model !== "string" || !model.trim() || model !== model.trim())) {
+		throw new Error("config.fastMode.models must be an array of exact non-empty model ID strings");
+	}
+}
+
 function validateOrcaProgressTabsConfig(value: unknown): void {
 	if (value === undefined) return;
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("config.orcaProgressTabs must be a JSON object");
@@ -178,6 +188,7 @@ function validateConfig(config: Record<string, unknown>): void {
 	validateArtifactConfig(config.artifactConfig);
 	validateCapacityConfig(config.capacity);
 	validateModelExclusionsConfig(config.modelExclusions);
+	validateFastModeConfig(config.fastMode);
 	validateModelResponseAliases(config.modelResponseAliases);
 	validateMainWindowRendererConfig(config.mainWindowRenderer);
 	validateOrcaProgressTabsConfig(config.orcaProgressTabs);
@@ -247,7 +258,7 @@ export function loadConfig(): ExtensionConfig {
 		try {
 			const raw = JSON.parse(fs.readFileSync(configPath, "utf-8")) as unknown;
 			if (raw && typeof raw === "object" && !Array.isArray(raw)
-				&& (Object.hasOwn(raw, "worktreeProvider") || Object.hasOwn(raw, "worktreeBranchPrefix") || Object.hasOwn(raw, "modelResponseAliases"))) throw error;
+				&& (Object.hasOwn(raw, "worktreeProvider") || Object.hasOwn(raw, "worktreeBranchPrefix") || Object.hasOwn(raw, "fastMode") || Object.hasOwn(raw, "modelResponseAliases"))) throw error;
 		} catch (readError) {
 			if (readError === error) throw error;
 		}
