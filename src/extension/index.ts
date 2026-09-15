@@ -40,6 +40,7 @@ import { createSubagentParamsSchema } from "./schemas.ts";
 import { resolveDisabledFeatureSurface } from "../shared/disabled-features.ts";
 import type { SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
 import { createAsyncJobTracker } from "../runs/background/async-job-tracker.ts";
+import { writeSessionFastModeSnapshot } from "../runs/background/control-channel.ts";
 import { getActiveAsyncCapacitySnapshot, resolveAbandonedSlotReleaseAfterMs, resolveMaxActiveAsyncRunsPerSession } from "../runs/background/active-async-capacity.ts";
 import { cleanupResultIndexes, missionObserverResultCandidateFiles, resultFilePath } from "../runs/background/result-files.ts";
 import { ASYNC_RETENTION_DELAY_MS, cleanupAsyncRetention } from "../runs/background/async-retention.ts";
@@ -73,13 +74,17 @@ import { handleSubagentSteeringNotice, type SubagentSteeringMessageDetails } fro
 import { SUBAGENT_CHILD_ENV, SUBAGENT_PARENT_SESSION_ENV } from "../runs/shared/child-runtime-config.ts";
 import { disposeChildSessions } from "../runs/shared/child-session.ts";
 import { resolveCurrentSubagentCapabilityCeiling } from "../runs/shared/capability-ceiling.ts";
-import { loadConfig, resolveAsyncByDefault, resolveScheduledStoreRoot } from "./config.ts";
+import { applyModelExclusionsConfig, loadConfig, resolveAsyncByDefault, resolveScheduledStoreRoot } from "./config.ts";
 import { buildSubagentToolDescription, buildSubagentToolPromptMetadata } from "./tool-description.ts";
 import { formatWorkflowPreflightSummary, normalizeWorkflowPreflight } from "../workflows/workflow-preflight.ts";
+
 import { runtimeReplacedAbortReason } from "../workflows/workflow-reuse.ts";
 import { autoResumeFailureText, cancelPendingWorkflowAutoResumes, finishWorkflowAutoResume, planWorkflowAutoResumes, WORKFLOW_AUTO_RESUME_MESSAGE_TYPE, type PendingWorkflowAutoResume } from "../workflows/workflow-auto-resume.ts";
 import { recordWorkflowResumeRefusal, releaseWorkflowResumeClaim, resumedRunStarted } from "../workflows/workflow-resume-claim.ts";
 import { workflowResumeRefusal } from "../workflows/workflow-resume.ts";
+
+import { registerSessionFastMode } from "./session-fast-mode.ts";
+import type { SessionFastModeSnapshot } from "../runs/shared/session-fast-mode.ts";
 import { finalizeToolResult } from "./tool-result.ts";
 import { flattenSubagentToolOptions } from "./subagent-options.ts";
 import { collectGoalContinuationNotices } from "../missions/goal-driver.ts";
@@ -308,6 +313,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	const config = loadConfig();
 	setDeclarationPinning(pi, config.pinToolDeclarations !== false);
+	// Apply the process-wide exclusion TTL before any child launch can record a model failure.
+	applyModelExclusionsConfig(config);
 	const waitToolConfig = resolveWaitToolConfig(config.waitTool);
 	const asyncByDefault = resolveAsyncByDefault(config);
 	const fleetViewEnabled = config.fleetView !== false;
@@ -361,6 +368,17 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			clear: () => {},
 		},
 	};
+	const broadcastSessionFastMode = (snapshot: SessionFastModeSnapshot): void => {
+		for (const job of state.asyncJobs.values()) {
+			if (job.status !== "queued" && job.status !== "running") continue;
+			try {
+				writeSessionFastModeSnapshot(job.asyncDir, snapshot);
+			} catch (error) {
+				console.error(`Failed to update Session Fast mode for async run '${job.asyncId}':`, error);
+			}
+		}
+	};
+	const sessionFastMode = registerSessionFastMode(pi, config.fastMode?.models ?? [], { onChange: broadcastSessionFastMode });
 	const withLastUiContext = <T>(run: (ctx: ExtensionContext) => T): T | undefined => {
 		const cached = state.lastUiContext;
 		return withCachedUiContext(cached, () => {
@@ -588,6 +606,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		findPendingAsks: (target) => supervisorChannel.findPendingAsks(target),
 		refreshResultDelivery: () => refreshResultDelivery(),
 		trackRetainedNestedRoute: undefined,
+		sessionFastMode,
 	};
 	let executor: SubagentExecutor | undefined;
 	let executorPromise: Promise<SubagentExecutor> | undefined;
@@ -891,6 +910,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	};
 	const asyncStartedHandler = (payload: unknown) => {
 		handleStarted(payload);
+		broadcastSessionFastMode(sessionFastMode.snapshot());
 		supervisorChannel.activateTransport();
 		refreshResultDelivery();
 		fleetStatus?.refresh();
@@ -928,6 +948,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		state.lastUiContext = ctx;
 		const activeJobCount = state.asyncJobs.size;
 		restoreActiveJobs(ctx);
+		broadcastSessionFastMode(sessionFastMode.snapshot());
 		if (state.asyncJobs.size > activeJobCount) herdrStatusBridge.syncRuns();
 		fleetStatus?.setContext(ctx);
 		fleetStatus?.refresh();
@@ -1026,6 +1047,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		logSlowPhase("foreground-history", phaseStartedAt);
 		phaseStartedAt = Date.now();
 		restoreActiveJobs(ctx, interruptedElsewhere?.observeStatus);
+		broadcastSessionFastMode(sessionFastMode.snapshot());
 		logSlowPhase("active-job-restore", phaseStartedAt);
 		phaseStartedAt = Date.now();
 		// Read-only and UI-only: never sent to the model, so prompts and history are unchanged.

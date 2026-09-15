@@ -2566,6 +2566,8 @@ export interface RunSyncOptions {
 	projectTrusted?: boolean;
 	/** The launching executor's own child runtime when it is itself an in-process child. */
 	childRuntime?: import("../runs/shared/child-runtime-config.ts").ChildRuntimeConfig;
+	/** Live root-session Fast policy for native in-process children. */
+	sessionFastMode?: import("../runs/shared/session-fast-mode.ts").SessionFastModePolicy;
 	/** Fires once the child session exists and can be steered. */
 	onChildSession?: (controls: ForegroundChildSessionControls) => void;
 	/** Opt-in global permission rules; missing tools remain allowed. */
@@ -2723,6 +2725,16 @@ export interface ScheduledRunsConfig {
 	storeRoot?: string;
 }
 
+export interface ModelExclusionsConfig {
+	/** Default duration in milliseconds. A lower configured value also shortens active cached exclusions. */
+	defaultTtlMs?: number;
+}
+
+export interface SessionFastModeConfig {
+	/** Exact provider-independent model IDs eligible for the priority service tier. */
+	models?: string[];
+}
+
 export type FleetViewPlacement = "aboveEditor" | "belowEditor";
 export type AsyncWidgetLayout = "adaptive" | "rows";
 
@@ -2796,6 +2808,10 @@ export interface ExtensionConfig {
 	programStatus?: boolean;
 	/** Add a short `active_subagents` system prompt section listing this session's active background runs. Defaults to false. */
 	activeRunsPrompt?: boolean;
+	/** Configure the process-wide TTL policy for persisted model exclusions. */
+	modelExclusions?: ModelExclusionsConfig;
+	/** Configure root-session Fast routing by exact provider-independent model ID. */
+	fastMode?: SessionFastModeConfig;
 	/** Exact provider/model candidates mapped to operator-declared equivalent response IDs. Empty arrays add no accepted IDs. */
 	modelResponseAliases?: Record<string, string[]>;
 	/** Named argv prefixes for background runners; agents select one with `launcher: <name>`. User config only. */

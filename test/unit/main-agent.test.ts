@@ -33,6 +33,26 @@ test("registers --agent as the named main-agent entry point", () => {
 	});
 });
 
+test("registers /fast as the root Session Fast command", () => {
+	const commands = new Map<string, { description?: string }>();
+	const events = { on() { return () => {}; }, emit() {} };
+	const pi = new Proxy({
+		events,
+		registerCommand(name: string, options: { description?: string }) {
+			commands.set(name, options);
+		},
+	}, {
+		get(target, property) {
+			if (property in target) return target[property as keyof typeof target];
+			return () => undefined;
+		},
+	});
+
+	registerSubagentExtension(pi as never);
+
+	assert.match(commands.get("fast")?.description ?? "", /Toggle Session Fast routing/);
+});
+
 test("applies a declared agent to the main session", async () => {
 	const modulePath = pathToFileURL(path.join(projectRoot, "src", "extension", "main-agent.ts")).href;
 	const mainAgentModule = await import(modulePath);
@@ -599,6 +619,7 @@ WORKER_ONLY_PROMPT_MARKER
 					getSessionId() { return "named-main-agent-parent"; },
 					getSessionFile() { return null; },
 					getEntries() { return []; },
+					getBranch() { return []; },
 				},
 			};
 

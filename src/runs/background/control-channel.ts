@@ -21,6 +21,7 @@ import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { POLL_INTERVAL_MS } from "../../shared/types.ts";
 import { shouldUseNativeFsWatch } from "../../shared/watch-strategy.ts";
 import { resolveWatchPath } from "../../shared/utils.ts";
+import { SESSION_FAST_MODE_SNAPSHOT_VERSION, type SessionFastModeSnapshot } from "../shared/session-fast-mode.ts";
 
 export type ControlChannelFs = Pick<typeof fs, "mkdirSync" | "existsSync" | "rmSync" | "watch" | "readdirSync" | "readFileSync" | "realpathSync">;
 
@@ -157,12 +158,32 @@ export function steerInboxClosedPath(asyncDir: string): string {
 	return path.join(controlInboxDir(asyncDir), STEER_INBOX_CLOSED_FILE);
 }
 
+
 export function stopInboxClosedPath(asyncDir: string): string {
 	return path.join(controlInboxDir(asyncDir), STOP_INBOX_CLOSED_FILE);
 }
 
 export function closeStopInbox(asyncDir: string): void {
 	writeAtomicJson(stopInboxClosedPath(asyncDir), { version: 1, closedAt: Date.now() });
+
+export function sessionFastModeSnapshotPath(asyncDir: string): string {
+	return path.join(controlInboxDir(asyncDir), "session-fast-mode.json");
+}
+
+export function writeSessionFastModeSnapshot(asyncDir: string, snapshot: SessionFastModeSnapshot): string {
+	const snapshotPath = sessionFastModeSnapshotPath(asyncDir);
+	writeAtomicJson(snapshotPath, snapshot);
+	return snapshotPath;
+}
+
+function parseSessionFastModeSnapshot(raw: unknown): SessionFastModeSnapshot | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const snapshot = raw as Partial<SessionFastModeSnapshot>;
+	if (snapshot.version !== SESSION_FAST_MODE_SNAPSHOT_VERSION
+		|| typeof snapshot.enabled !== "boolean"
+		|| !Array.isArray(snapshot.modelIds)
+		|| !snapshot.modelIds.every((modelId) => typeof modelId === "string" && Boolean(modelId.trim()) && modelId === modelId.trim())) return undefined;
+	return { version: SESSION_FAST_MODE_SNAPSHOT_VERSION, enabled: snapshot.enabled, modelIds: [...snapshot.modelIds] };
 }
 
 export function closeSteerInbox(asyncDir: string, state: string, write: (filePath: string, payload: object) => void = writeAtomicJson): void {
@@ -559,6 +580,7 @@ export function watchAsyncControlInbox(
 		onStop?: (request: StopRequest) => void;
 		onSteer?: (request: SteerRequest) => void;
 		onCommand?: (request: CommandRequest) => void;
+		onSessionFastMode?: (snapshot: SessionFastModeSnapshot) => void;
 		onError?: (error: unknown, phase: "install" | "scan" | "callback", request?: SteerRequest) => void;
 		pollIntervalMs?: number;
 		safetyPollIntervalMs?: number;
@@ -599,7 +621,7 @@ export function watchAsyncControlInbox(
 		repeated.since = now;
 	};
 	const dirs = [
-		...(opts.onInterrupt || opts.onTimeout || opts.onStop ? [dir] : []),
+		...(opts.onInterrupt || opts.onTimeout || opts.onStop || opts.onSessionFastMode ? [dir] : []),
 		...(opts.onStop ? [stopRequestsDir(asyncDir)] : []),
 		...(opts.onSteer ? [steerRequestsDir(asyncDir)] : []),
 		...(opts.onCommand ? [commandRequestsDir(asyncDir)] : []),
@@ -612,10 +634,24 @@ export function watchAsyncControlInbox(
 	}
 
 	let disposed = false;
+	let lastSessionFastModeContent: string | undefined;
 	const check = (): void => {
 		if (disposed) return;
 		scanFailed = false;
 		try {
+			if (opts.onSessionFastMode && fsImpl.existsSync(sessionFastModeSnapshotPath(asyncDir))) {
+				try {
+					const content = fsImpl.readFileSync(sessionFastModeSnapshotPath(asyncDir), "utf-8");
+					if (content !== lastSessionFastModeContent) {
+						const snapshot = parseSessionFastModeSnapshot(JSON.parse(content));
+						if (!snapshot) throw new Error("Session Fast mode snapshot is malformed.");
+						lastSessionFastModeContent = content;
+						try { opts.onSessionFastMode(snapshot); } catch (error) { report(error, "callback"); }
+					}
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ENOENT") report(error, "scan");
+				}
+			}
 			if (opts.onCommand) for (const request of consumeCommandRequests(asyncDir, fsImpl)) {
 				try { opts.onCommand(request); } catch (error) { report(error, "callback"); }
 			}
