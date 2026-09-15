@@ -1001,7 +1001,6 @@ export interface ModelAttempt {
 	error?: string;
 	usage?: Usage;
 	failureCategory?: import("../runs/shared/model-fallback.ts").ModelFailureCategory;
-	failureDomain?: string;
 	effects?: import("../runs/shared/model-fallback.ts").RetryEffectClass;
 	retryMode?: "restart" | "resume";
 	nextModel?: string;
@@ -2406,6 +2405,8 @@ export interface RunSyncOptions {
 	allowIntercomDetach?: boolean;
 	intercomEvents?: IntercomEventBus;
 	onUpdate?: (r: import("@earendil-works/pi-agent-core").AgentToolResult<Details>) => void;
+	/** Human-only notification channel for model probe results; never enters the child or parent model context. */
+	onModelPerformanceProbe?: (message: string, level: "info" | "warning") => void;
 	/** Internal structured-delegation transport optimization: skip unchanged live snapshots. */
 	suppressUnchangedDelegationUpdates?: boolean;
 	onControlEvent?: (event: ControlEvent) => void;
@@ -2443,6 +2444,8 @@ export interface RunSyncOptions {
 	modelCandidates?: string[];
 	/** Frozen semantic class, source, digest, and candidates for observability/resume. */
 	modelRouting?: ModelRoutingSnapshot;
+	/** Effective thresholds and cache lifetime for model-class performance routing. */
+	modelPerformance?: import("../runs/shared/model-performance.ts").ModelPerformanceConfig;
 	/** Opt into priority service tier for supported native OpenAI-Codex launches. */
 	fast?: boolean;
 	/** The override came from the running parent session, not configuration. */

@@ -241,6 +241,12 @@ describe("async runner execution", () => {
 	});
 
 	it("freezes a named model pool into async runner candidates", () => {
+		const modelPerformance = {
+			firstTokenTimeoutMs: 12_000,
+			hardTokensPerSecond: 3,
+			softTokensPerSecond: 9,
+			cacheTtlMs: 45_000,
+		};
 		const result = buildAsyncRunnerSteps("tiered-run", {
 			chain: [{ agent: "worker", task: "hard task", modelClass: "smart" }],
 			agents: [agent("worker")],
@@ -250,6 +256,7 @@ describe("async runner execution", () => {
 				{ provider: "anthropic", id: "smart-b", fullId: "anthropic/smart-b" },
 			],
 			modelPools: { smart: ["openai/smart-a", "anthropic/smart-b"] },
+			modelPerformance,
 			asyncDir: path.join(process.cwd(), ".tmp-model-class-test"),
 			maxSubagentDepth: 2,
 		});
@@ -257,6 +264,7 @@ describe("async runner execution", () => {
 		assert.deepEqual(result.steps[0]?.modelCandidates, ["openai/smart-a", "anthropic/smart-b"]);
 		assert.equal(result.steps[0]?.modelRouting?.modelClass, "smart");
 		assert.equal(result.steps[0]?.modelRouting?.source, "per-run");
+		assert.deepEqual(result.steps[0]?.modelPerformance, modelPerformance);
 	});
 });
 

@@ -170,6 +170,7 @@ interface AsyncChainParams {
 	availableModels?: AvailableModelInfo[];
 	modelPools?: ModelPools;
 	modelPoolSources?: ModelPoolSources;
+	modelPerformance?: import("../shared/model-performance.ts").ModelPerformanceConfig;
 	cwd?: string;
 	maxOutput?: MaxOutputConfig;
 	artifactsDir?: string;
@@ -258,6 +259,7 @@ interface AsyncSingleParams {
 	availableModels?: AvailableModelInfo[];
 	modelPools?: ModelPools;
 	modelPoolSources?: ModelPoolSources;
+	modelPerformance?: import("../shared/model-performance.ts").ModelPerformanceConfig;
 	maxSubagentDepth: number;
 	waitToolEnabled?: boolean;
 	waitToolDefaultTimeoutMs?: number;
@@ -322,6 +324,7 @@ export interface AsyncRunnerStepBuildParams {
 	availableModels?: AvailableModelInfo[];
 	modelPools?: ModelPools;
 	modelPoolSources?: ModelPoolSources;
+	modelPerformance?: import("../shared/model-performance.ts").ModelPerformanceConfig;
 	cwd?: string;
 	chainSkills?: string[];
 	sessionFilesByFlatIndex?: (string | undefined)[];
@@ -1045,6 +1048,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			launchResolvedExtensions,
 			modelCandidates: externalRunner ? undefined : modelCandidates,
 			...(routing && toModelRoutingSnapshot(routing, modelCandidates) ? { modelRouting: toModelRoutingSnapshot(routing, modelCandidates) } : {}),
+			...(routing && params.modelPerformance ? { modelPerformance: params.modelPerformance } : {}),
 			...(primaryModelFromParent ? { skipPrimaryModelVerification: true } : {}),
 			...(availableModels && availableModels.length > 0 ? { modelVerificationRegistry: availableModels } : {}),
 			...(ctx.modelResponseAliases ? { modelResponseAliases: ctx.modelResponseAliases } : {}),
@@ -1296,6 +1300,7 @@ export function executeAsyncChain(
 		availableModels: params.availableModels,
 		modelPools: params.modelPools,
 		modelPoolSources: params.modelPoolSources,
+		modelPerformance: params.modelPerformance,
 		cwd,
 		chainSkills: params.chainSkills,
 		sessionFilesByFlatIndex,
@@ -1933,6 +1938,7 @@ export function executeAsyncSingle(
 						...(thinkingCeiling ? { thinkingCeiling } : {}),
 						modelCandidates,
 						...(modelRouting ? { modelRouting } : {}),
+						...(modelRouting && params.modelPerformance ? { modelPerformance: params.modelPerformance } : {}),
 						...(modelOrigin === "inherited" ? { skipPrimaryModelVerification: true } : {}),
 						...(availableModels && availableModels.length > 0 ? { modelVerificationRegistry: availableModels } : {}),
 						...(ctx.modelResponseAliases ? { modelResponseAliases: ctx.modelResponseAliases } : {}),

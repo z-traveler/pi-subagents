@@ -115,6 +115,50 @@ describe("builtin agent overrides", () => {
 		assert.equal(discovered.agents.find((agent) => agent.name === "scout")?.modelClass, "fast");
 	});
 
+	it("merges optional model performance settings with defaults", () => {
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: {
+				modelPerformance: {
+					firstTokenTimeoutMs: 60_000,
+					cacheTtlMs: 120_000,
+				},
+			},
+		});
+		fs.mkdirSync(path.join(tempProject, ".pi"), { recursive: true });
+		writeJson(path.join(tempProject, ".pi", "settings.json"), {
+			subagents: {
+				modelPerformance: {
+					hardTokensPerSecond: 1,
+					softTokensPerSecond: 6,
+				},
+			},
+		});
+
+		assert.deepEqual(discoverAgents(tempProject, "both").modelPerformance, {
+			firstTokenTimeoutMs: 60_000,
+			hardTokensPerSecond: 1,
+			softTokensPerSecond: 6,
+			cacheTtlMs: 120_000,
+		});
+	});
+
+	it("rejects invalid model performance thresholds", () => {
+		const settingsPath = path.join(tempHome, ".pi", "agent", "settings.json");
+		writeJson(settingsPath, {
+			subagents: {
+				modelPerformance: {
+					hardTokensPerSecond: 9,
+					softTokensPerSecond: 8,
+				},
+			},
+		});
+
+		assert.throws(
+			() => discoverAgents(tempProject, "both"),
+			/modelPerformance.*hardTokensPerSecond.*less than softTokensPerSecond/,
+		);
+	});
+
 	it("lets a concrete agent override replace a custom agent model class", () => {
 		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
 			subagents: {

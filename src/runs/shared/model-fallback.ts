@@ -431,6 +431,8 @@ export interface BuildModelCandidatesOptions {
 	primaryModelFromParent?: boolean;
 	/** How the primary model was selected. Explicit stays strict and does not rotate to fallbacks. */
 	origin?: ModelOrigin;
+	/** Model-class candidates are independent per-run choices, not cross-run cooldown targets. */
+	ignoreCachedExclusions?: boolean;
 }
 
 export type ModelClassSource = "per-run" | "agent-override" | "agent-frontmatter";
@@ -477,7 +479,7 @@ export function resolveModelRouting(input: ResolveModelRoutingInput): ModelRouti
 	if (input.explicitModel !== undefined && input.explicitModelClass !== undefined) {
 		throw new Error("A subagent launch cannot set both 'model' and 'modelClass'.");
 	}
-	const requestedModelClass = input.explicitModelClass ?? input.agentModelClass;
+	const requestedModelClass = input.explicitModelClass ?? (input.explicitModel === undefined ? input.agentModelClass : undefined);
 	const modelClassSource: ModelClassSource | undefined = input.explicitModelClass !== undefined
 		? "per-run"
 		: requestedModelClass !== undefined
@@ -502,6 +504,7 @@ export function resolveModelRouting(input: ResolveModelRoutingInput): ModelRouti
 				{
 					scope: configuredScopes(input.modelScope).map((scope) => ({ ...scope, strict: true })),
 					origin: "configured",
+					ignoreCachedExclusions: true,
 				},
 			);
 		} catch (error) {
@@ -619,10 +622,12 @@ export function buildModelCandidates(
 		seen.add(normalized);
 		candidates.push(normalized);
 	}
-	const resolved = filterFallbackCandidates(candidates, {
-		onExcluded: warnCachedExclusion,
-		ignoreExclusion: (candidate, exclusion) => ignoreStaleModelUnavailableExclusion(candidate, exclusion, availableModels),
-	});
+	const resolved = options?.ignoreCachedExclusions
+		? candidates
+		: filterFallbackCandidates(candidates, {
+			onExcluded: warnCachedExclusion,
+			ignoreExclusion: (candidate, exclusion) => ignoreStaleModelUnavailableExclusion(candidate, exclusion, availableModels),
+		});
 	if (resolved.length === 0) {
 		if (skippedPrimary) resolveRequiredSubagentModelCandidate(skippedPrimary, availableModels, preferredProvider);
 		if (candidates.length === 0 && skippedFallback) resolveRequiredSubagentModelCandidate(skippedFallback, availableModels, preferredProvider);
@@ -642,19 +647,23 @@ export function buildModelCandidates(
 	return resolved;
 }
 
+const PROVIDER_ACCESS_STATUS_PATTERNS = [
+	/^\s*(?:401|403)(?:\s*:|\s*$)/,
+	/\bHTTP(?:\/\d(?:\.\d)?)?(?:\s+status)?\s+(?:401|403)\b/i,
+];
+
 const RETRYABLE_MODEL_FAILURE_PATTERNS = [
 	/^REQUEST_LIMIT_EXCEEDED$/,
 	/rate\s*limit/i,
 	/usage\s*limit/i,
 	/too many requests/i,
+	...PROVIDER_ACCESS_STATUS_PATTERNS,
 	/\b408\b/,
 	/\b409\b/,
 	/\b429\b/,
 	/quota/i,
 	/billing/i,
 	/credit/i,
-	// OpenRouter can return only a status-prefixed body, without auth-related prose.
-	/^\s*401\s*:/,
 	/auth(?:entication)?/i,
 	/unauthori[sz]ed/i,
 	/forbidden/i,
@@ -701,7 +710,7 @@ const TOOL_FAILURE_PREFIX = /^[\w.:@/-]+ failed (?:(?:\(exit \d+\):)|(?:with exi
 export type ModelFailureCategory = "transient" | "candidate-unavailable" | "failure-domain" | "context" | "policy" | "tool" | "control" | "unknown";
 export type RetryEffectClass = "none" | "workspace" | "external-or-unknown";
 
-const FAILURE_DOMAIN_PATTERNS = [/^REQUEST_LIMIT_EXCEEDED$/, /^\s*401\s*:/, /\b401\b/, /\b403\b/, /quota/i, /billing/i, /credit/i, /usage\s*limit/i, /auth(?:entication)?/i, /unauthori[sz]ed/i, /forbidden/i, /api key/i, /token expired/i, /invalid key/i];
+const FAILURE_DOMAIN_PATTERNS = [/^REQUEST_LIMIT_EXCEEDED$/, ...PROVIDER_ACCESS_STATUS_PATTERNS, /quota/i, /billing/i, /credit/i, /usage\s*limit/i, /auth(?:entication)?/i, /unauthori[sz]ed/i, /forbidden/i, /api key/i, /token expired/i, /invalid key/i];
 const CANDIDATE_UNAVAILABLE_PATTERNS = [/model.*unavailable/i, /model.*disabled/i, /model.*not found/i, /unknown model/i, /model.*(?:load|fail|error)/i, /cold.?start/i];
 const POLICY_FAILURE_PATTERNS = [/content policy/i, /safety policy/i, /policy refusal/i, /content moderation/i];
 export function classifyModelFailure(input: {
@@ -866,13 +875,6 @@ export function classifyRetryEffects(input: {
 	return workspace ? "workspace" : "none";
 }
 
-function modelProvider(model: string | undefined): string | undefined {
-	if (!model) return undefined;
-	const { baseModel } = splitThinkingSuffix(model);
-	const slash = baseModel.indexOf("/");
-	return slash > 0 ? normalizeModelSegment(baseModel.slice(0, slash)) : undefined;
-}
-
 export type ModelFailoverDecision =
 	| { retry: true; mode: "restart" | "resume" }
 	| { retry: false; reason: string };
@@ -888,11 +890,6 @@ export function decideModelFailover(input: {
 	if (input.category !== "transient" && input.category !== "candidate-unavailable" && input.category !== "failure-domain") {
 		return { retry: false, reason: input.category };
 	}
-	if (input.category === "failure-domain") {
-		const currentProvider = modelProvider(input.currentModel);
-		const nextProvider = modelProvider(input.nextModel);
-		if (!currentProvider || !nextProvider || currentProvider === nextProvider) return { retry: false, reason: "same-failure-domain" };
-	}
 	return { retry: true, mode: input.effects === "workspace" ? "resume" : "restart" };
 }
 
@@ -902,30 +899,18 @@ export function selectModelFailover(input: {
 	candidates: string[];
 	currentIndex: number;
 	effects: RetryEffectClass;
-}): { decision: ModelFailoverDecision; nextIndex?: number; skippedModels: string[]; failureDomain?: string } {
-	let nextIndex = input.currentIndex + 1;
-	const skippedModels: string[] = [];
-	let decision = decideModelFailover({
+}): { decision: ModelFailoverDecision; nextIndex?: number; skippedModels: string[] } {
+	const nextIndex = input.currentIndex + 1;
+	const decision = decideModelFailover({
 		category: input.category,
 		currentModel: input.currentModel,
 		nextModel: input.candidates[nextIndex],
 		effects: input.effects,
 	});
-	while (!decision.retry && input.category === "failure-domain" && decision.reason === "same-failure-domain" && nextIndex < input.candidates.length) {
-		skippedModels.push(input.candidates[nextIndex]!);
-		nextIndex += 1;
-		decision = decideModelFailover({
-			category: input.category,
-			currentModel: input.currentModel,
-			nextModel: input.candidates[nextIndex],
-			effects: input.effects,
-		});
-	}
 	return {
 		decision,
 		...(decision.retry ? { nextIndex } : {}),
-		skippedModels,
-		...(modelProvider(input.currentModel) ? { failureDomain: modelProvider(input.currentModel) } : {}),
+		skippedModels: [],
 	};
 }
 

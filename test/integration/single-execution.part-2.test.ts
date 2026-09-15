@@ -66,6 +66,7 @@ import { createResultWatcher } from "../../src/runs/background/result-watcher.ts
 import { clearExclusions, recordModelFailure } from "../../src/runs/shared/model-exclusions.ts";
 import { createWorkflowChildPermit, workflowChildPermitConsumed } from "../../src/shared/workflow-child-permit.ts";
 import { toSubagentDelegationExecutionParams } from "../../src/slash/delegation-adapters.ts";
+import { createModelPerformanceCacheKey, ModelPerformanceStore } from "../../src/runs/shared/model-performance.ts";
 
 describe("single sync execution", { skip: !available ? "pi packages not available" : undefined }, () => {
 	installSingleExecutionHooks();
@@ -2745,6 +2746,34 @@ if (!fs.existsSync(${JSON.stringify(holdPath)})) { console.log('{}'); } else {
 		assert.equal(mockPi.callCount(), 2);
 	});
 
+	it("starts a model-class child with the fastest fresh cached candidate", async () => {
+		mockPi.onCall({ output: "Completed on cached winner" });
+		const candidates = ["gateway/primary", "gateway/faster"];
+		const routing = {
+			modelClass: "smart",
+			source: "per-run" as const,
+			poolDigest: "performance-ranked-pool",
+			candidates,
+		};
+		const key = createModelPerformanceCacheKey(routing, candidates);
+		const store = new ModelPerformanceStore();
+		const recordedAt = Date.now();
+		store.record(key, { candidate: "gateway/primary", recordedAt, ttftMs: 3_000, estimatedTokensPerSecond: 4, source: "run" });
+		store.record(key, { candidate: "gateway/faster", recordedAt, ttftMs: 500, estimatedTokensPerSecond: 20, source: "probe" });
+
+		const result = await runSync(tempDir, [makeAgent("echo")], "echo", "Task", {
+			runId: "model-class-performance-ranked-sync",
+			modelCandidates: candidates,
+			modelRouting: routing,
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.model, "gateway/faster");
+		assert.deepEqual(result.attemptedModels, ["gateway/faster"]);
+		assert.deepEqual(result.modelRouting, routing, "cache ranking must not rewrite the frozen routing snapshot");
+		assert.equal(mockPi.callCount(), 1);
+	});
+
 	it("freezes thinking-adjusted model-class candidates in foreground routing metadata", async () => {
 		mockPi.onCall({ output: "Completed" });
 		const candidates = ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:medium"];
@@ -2784,7 +2813,7 @@ if (!fs.existsSync(${JSON.stringify(holdPath)})) { console.log('{}'); } else {
 		assert.equal(mockPi.callCount(), 0);
 	});
 
-	it("skips same-provider candidates after a model-class failure-domain error", async () => {
+	it("tries the next same-provider candidate after a model-class quota error", async () => {
 		mockPi.onCall({
 			jsonl: [{
 				type: "message_end",
@@ -2798,7 +2827,7 @@ if (!fs.existsSync(${JSON.stringify(holdPath)})) { console.log('{}'); } else {
 			}],
 			exitCode: 1,
 		});
-		mockPi.onCall({ output: "Recovered in another failure domain" });
+		mockPi.onCall({ output: "Recovered on the same gateway" });
 		const candidates = [
 			"openai/gpt-5-mini",
 			"openai/gpt-5",
@@ -2817,10 +2846,9 @@ if (!fs.existsSync(${JSON.stringify(holdPath)})) { console.log('{}'); } else {
 		});
 
 		assert.equal(result.exitCode, 0);
-		assert.equal(result.model, "anthropic/claude-sonnet-4");
-		assert.deepEqual(result.attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
-		assert.deepEqual(result.modelAttempts?.[0]?.skippedModels, ["openai/gpt-5"]);
-		assert.equal(result.modelAttempts?.[0]?.failureDomain, "openai");
+		assert.equal(result.model, "openai/gpt-5");
+		assert.deepEqual(result.attemptedModels, ["openai/gpt-5-mini", "openai/gpt-5"]);
+		assert.equal(result.modelAttempts?.[0]?.skippedModels, undefined);
 		assert.equal(mockPi.callCount(), 2);
 	});
 

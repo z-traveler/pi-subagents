@@ -8,7 +8,7 @@
 import type { Message } from "@earendil-works/pi-ai";
 import type { ChildTranscriptWriter } from "../../shared/child-transcript.ts";
 import { extractTextFromContent, extractToolArgsPreview, getFinalOutput, hasEmptyTerminalAssistantResponse } from "../../shared/utils.ts";
-import type { EffectsProjection, RuntimeAcknowledgedChildExtensions, SubagentOutputState, ToolBudgetState, Usage } from "../../shared/types.ts";
+import type { EffectsProjection, ModelAttempt, RuntimeAcknowledgedChildExtensions, SubagentOutputState, ToolBudgetState, Usage } from "../../shared/types.ts";
 import {
 	acceptChildWatchdogEvent,
 	applyChildWatchdogMessage,
@@ -26,6 +26,14 @@ import { createReportedChildSessionInput, type InProcessChildLaunch } from "../s
 import { childSessionHasQueuedMessages, projectChildSessionEventForJson, type ChildSession, type ChildSessionEvent, type ChildSessionFactory } from "../shared/child-session.ts";
 import { formatSteerMessage } from "../shared/subagent-prompt-runtime.ts";
 import { getReadonlySessionEvidence, requestReadonlySessionEvidence, type SettledReadonlyEvidence } from "../shared/readonly-session-evidence.ts";
+import {
+	generationDeltaText,
+	ModelClassPerformanceTracker,
+	type ModelPerformanceCacheKey,
+	type ModelPerformanceConfig,
+	type ModelPerformanceStore,
+	type ModelPerformanceSwitch,
+} from "../shared/model-performance.ts";
 import type { SteerDeliveryStatus, SteerRequest } from "./control-channel.ts";
 import { takeMatchingAcceptedSteer, unconsumedSteerReason } from "./steering.ts";
 
@@ -84,9 +92,13 @@ export interface RunChildSessionInput {
 	registerInterrupt?: (interrupt: (() => void) | undefined) => void;
 	registerTimeout?: (interrupt: (() => void) | undefined) => void;
 	registerStop?: (stop: (() => void) | undefined) => void;
+	timeoutSignal?: AbortSignal;
+	stopSignal?: AbortSignal;
 	registerSteer?: (steer: StepSteerHandler | undefined) => void;
 	/** Consumption (or unconsumed settlement) after the child accepted a steer or follow-up. */
 	onSteerOutcome?: (request: SteerRequest, delivery: SteerDelivery) => void;
+	/** Called immediately after the primary child prompt has been started. */
+	onPrimaryPromptStarted?: () => void;
 	/** Receives the sink the child's watchdog hook reports status through; the launch's `watchdogStatus` must forward to it. */
 	registerWatchdogStatus?: (sink: ((event: ChildWatchdogStatusEvent) => void) | undefined) => void;
 	timeoutMessage?: string;
@@ -103,6 +115,15 @@ export interface RunChildSessionInput {
 	readonlyContinuation?: { source: ChildSession; expected: SettledReadonlyEvidence; modelId: string };
 	collectReadonlyEvidence?: boolean;
 	canContinue?: () => boolean;
+	modelPerformance?: {
+		candidates: readonly string[];
+		currentCandidate: string;
+		config: ModelPerformanceConfig;
+		cacheKey: ModelPerformanceCacheKey;
+		store: ModelPerformanceStore;
+		verifyModel: boolean;
+		onSwitch?: (action: ModelPerformanceSwitch) => void;
+	};
 }
 
 const settledChildren = new WeakMap<RunChildSessionResult, ChildSession>();
@@ -140,6 +161,11 @@ export interface RunChildSessionResult {
 	runtimeAcknowledgedExtensions?: RuntimeAcknowledgedChildExtensions;
 	abortRecoveryDiagnostic?: string;
 	effects?: EffectsProjection;
+	/** Internal per-model accounting for transparent in-session performance switches. */
+	performanceAttempts?: ModelAttempt[];
+	performanceAttemptedModels?: string[];
+	performanceCurrentCandidate?: string;
+	performanceCurrentUsage?: Usage;
 }
 
 /** Events the child emits while the model streams; not persisted into the diagnostic log. */
@@ -204,10 +230,55 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 		let finalHardFinishTimer: NodeJS.Timeout | undefined;
 		let watchdogTailTimer: NodeJS.Timeout | undefined;
 		let abortSettleTimer: NodeJS.Timeout | undefined;
+		let performanceTimer: NodeJS.Timeout | undefined;
 		let childWatchdogState: ChildWatchdogStateSnapshot | undefined;
 		const childLifecycleState: ChildLifecycleState = { compactionRetryActive: false };
 		const timeoutMessage = () => input.timeoutMessage ?? "Subagent timed out.";
 		const stopMessage = () => input.stopMessage ?? "Subagent stopped by user.";
+		const performanceTracker = input.modelPerformance
+			? new ModelClassPerformanceTracker({
+				candidates: input.modelPerformance.candidates,
+				currentCandidate: input.modelPerformance.currentCandidate,
+				config: input.modelPerformance.config,
+				observations: () => input.modelPerformance!.store.read(input.modelPerformance!.cacheKey, input.modelPerformance!.config.cacheTtlMs),
+			})
+			: undefined;
+		const performanceAttempts: ModelAttempt[] = [];
+		const performanceAttemptedModels = input.modelPerformance ? [input.modelPerformance.currentCandidate] : [];
+		const performanceUsage = new Map<string, Usage>();
+		let activePerformanceCandidate = input.modelPerformance?.currentCandidate;
+		let performancePaused = false;
+		let performanceSwitchSupported = false;
+		let hardPerformanceRetry: {
+			action: ModelPerformanceSwitch;
+			messageCount: number;
+			assistantError?: string;
+		} | undefined;
+		let pendingSoftPerformanceSwitch: ModelPerformanceSwitch | undefined;
+		let expectedModelForVerification = input.expectedModelForVerification;
+		const usageForPerformanceModel = (candidate: string): Usage => {
+			let candidateUsage = performanceUsage.get(candidate);
+			if (!candidateUsage) {
+				candidateUsage = emptyUsage();
+				performanceUsage.set(candidate, candidateUsage);
+			}
+			return candidateUsage;
+		};
+		const recordPerformanceAttempt = (action: ModelPerformanceSwitch): void => {
+			performanceAttempts.push({
+				model: action.from,
+				success: false,
+				exitCode: null,
+				error: action.severity === "hard"
+					? "Generation was too slow; the incomplete response was discarded."
+					: "Generation was slow; the completed response was retained.",
+				usage: { ...(performanceUsage.get(action.from) ?? emptyUsage()) },
+				retryMode: action.severity === "hard" ? "restart" : "resume",
+				nextModel: action.to,
+				failoverReason: `performance:${action.severity}`,
+			});
+			if (!performanceAttemptedModels.includes(action.to)) performanceAttemptedModels.push(action.to);
+		};
 
 		type ActiveToolCall = { key: string; tool: string; args?: string; path?: string };
 		let activeToolSequence = 0;
@@ -263,6 +334,21 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 				}, ABORT_SETTLE_MS);
 				abortSettleTimer.unref?.();
 			}
+		};
+		const assessModelPerformance = (now: number): void => {
+			if (!performanceTracker || performancePaused || !performanceSwitchSupported || settled || promptSettled) return;
+			const assessment = performanceTracker.assess(now);
+			if (assessment.level !== "hard") return;
+			if (activePerformanceCandidate && input.modelPerformance) {
+				input.modelPerformance.store.invalidate(input.modelPerformance.cacheKey, activePerformanceCandidate);
+			}
+			if (!assessment.switch || hardPerformanceRetry || !session?.retryCurrentResponseWithModel) return;
+			hardPerformanceRetry = {
+				action: assessment.switch,
+				messageCount: messages.length,
+				assistantError,
+			};
+			abortChild();
 		};
 
 		const writeOutputText = (text: string) => {
@@ -459,6 +545,25 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 				}
 				return;
 			}
+			const now = Date.now();
+			if (performanceTracker) {
+				if (event.type === "auto_retry_start") performancePaused = true;
+				if (event.type === "auto_retry_end") {
+					performancePaused = false;
+					activePerformanceCandidate = performanceTracker.currentCandidate;
+					performanceTracker.startResponse(now);
+				}
+				if (event.type === "turn_start") {
+					performancePaused = false;
+					activePerformanceCandidate = performanceTracker.currentCandidate;
+					performanceTracker.startResponse(now);
+				}
+				if (event.type === "message_update" && !performancePaused) {
+					const delta = generationDeltaText(event.assistantMessageEvent);
+					if (delta) performanceTracker.recordDelta(delta, now);
+					assessModelPerformance(now);
+				}
+			}
 
 			input.onChildEvent?.(event);
 
@@ -513,8 +618,8 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 				const hasToolCall = assistantStartsToolCall(event.message);
 				if (event.message.model) {
 					model = event.message.model;
-					if (input.expectedModelForVerification && !hasToolCall) {
-						const modelVerificationError = formatSubagentModelVerificationError(input.expectedModelForVerification, event.message.model, input.modelVerificationRegistry, input.modelResponseAliases);
+					if (expectedModelForVerification && !hasToolCall) {
+						const modelVerificationError = formatSubagentModelVerificationError(expectedModelForVerification, event.message.model, input.modelVerificationRegistry, input.modelResponseAliases);
 						if (modelVerificationError && !error) error = modelVerificationError;
 					}
 				}
@@ -524,6 +629,10 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 					assistantError = undefined;
 				}
 				const eventUsage = event.message.usage;
+				const responsePerformanceUsage = activePerformanceCandidate
+					? usageForPerformanceModel(activePerformanceCandidate)
+					: undefined;
+				if (responsePerformanceUsage) responsePerformanceUsage.turns++;
 				if (eventUsage) {
 					usage.turns++;
 					usage.input += eventUsage.input ?? eventUsage.inputTokens ?? 0;
@@ -531,6 +640,31 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 					usage.cacheRead += eventUsage.cacheRead ?? 0;
 					usage.cacheWrite += eventUsage.cacheWrite ?? 0;
 					usage.cost += eventUsage.cost?.total ?? 0;
+					if (responsePerformanceUsage) {
+						responsePerformanceUsage.input += eventUsage.input ?? eventUsage.inputTokens ?? 0;
+						responsePerformanceUsage.output += eventUsage.output ?? eventUsage.outputTokens ?? 0;
+						responsePerformanceUsage.cacheRead += eventUsage.cacheRead ?? 0;
+						responsePerformanceUsage.cacheWrite += eventUsage.cacheWrite ?? 0;
+						responsePerformanceUsage.cost += eventUsage.cost?.total ?? 0;
+					}
+				}
+				if (performanceTracker && !performancePaused) {
+					const completedPerformance = performanceTracker.completeResponse(
+						now,
+						hasToolCall && Boolean(session?.switchModelForNextResponse),
+					);
+					if (completedPerformance.sample && activePerformanceCandidate && input.modelPerformance) {
+						input.modelPerformance.store.record(input.modelPerformance.cacheKey, {
+							candidate: activePerformanceCandidate,
+							recordedAt: now,
+							ttftMs: completedPerformance.sample.ttftMs,
+							estimatedTokensPerSecond: completedPerformance.sample.estimatedTokensPerSecond,
+							source: "run",
+						}, input.modelPerformance.config.cacheTtlMs);
+					}
+					if (completedPerformance.switch && session?.switchModelForNextResponse) {
+						pendingSoftPerformanceSwitch = completedPerformance.switch;
+					}
 				}
 				if (isTerminalAssistantStop(event.message)) {
 					if (!event.message.errorMessage && extractTextFromContent(event.message.content).trim()) assistantError = undefined;
@@ -542,6 +676,21 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 					applyChildLifecycle(projectChildLifecycle(event, true, childLifecycleState));
 				}
 			}
+			if (event.type === "turn_end" && pendingSoftPerformanceSwitch && session?.switchModelForNextResponse) {
+				const action = pendingSoftPerformanceSwitch;
+				pendingSoftPerformanceSwitch = undefined;
+				recordPerformanceAttempt(action);
+				expectedModelForVerification = input.modelPerformance?.verifyModel ? action.to : undefined;
+				model = action.to;
+				input.modelPerformance?.onSwitch?.(action);
+				input.writeOutputLine(`[model performance] ${action.from} was slow; next response will use ${action.to}.`);
+				void session.switchModelForNextResponse(action.to).catch((switchError) => {
+					const message = switchError instanceof Error ? switchError.message : String(switchError);
+					error = `Unable to switch slow model response: ${message}`;
+					assistantError = error;
+					abortChild();
+				});
+			}
 		};
 
 		/** Stops observing the child and returns when its extensions have shut down. */
@@ -549,6 +698,10 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 			clearFinalDrainTimers();
 			clearWatchdogTailTimer();
 			clearAllToolTimeouts();
+			if (performanceTimer) {
+				clearInterval(performanceTimer);
+				performanceTimer = undefined;
+			}
 			if (abortSettleTimer) {
 				clearTimeout(abortSettleTimer);
 				abortSettleTimer = undefined;
@@ -595,7 +748,7 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 					usage,
 					toolCount,
 					durationMs: Date.now() - startedAt,
-					model,
+					model: activePerformanceCandidate ?? model,
 					error: stopped ? stopMessage() : timedOut ? (error ?? timeoutMessage()) : interrupted || (forcedDrainAfterFinalSuccess && !forcedDrainAfterEmptyTerminal) ? undefined : finalError,
 					finalOutput: (timedOut || stopped) && !finalOutput.trim() ? (stopped ? stopMessage() : error ?? timeoutMessage()) : finalOutput,
 					outputState: finalOutput.trim() ? "present" : "absent",
@@ -611,6 +764,10 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 					currentToolArgs,
 					currentPath,
 					afterCompactionSettlement: afterCompactionSettlement || undefined,
+					performanceAttempts: performanceAttempts.length > 0 ? performanceAttempts : undefined,
+					performanceAttemptedModels: performanceAttemptedModels.length > 1 ? performanceAttemptedModels : undefined,
+					performanceCurrentCandidate: activePerformanceCandidate,
+					performanceCurrentUsage: activePerformanceCandidate ? { ...usageForPerformanceModel(activePerformanceCandidate) } : undefined,
 				});
 				if (session && !forced && !forcedTermination && !interrupted && !timedOut && !stopped && getReadonlySessionEvidence(session)) settledChildren.set(result, session);
 				resolve(result);
@@ -651,6 +808,12 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 					return;
 				}
 				session = created;
+				performanceSwitchSupported = typeof created.retryCurrentResponseWithModel === "function";
+				if (performanceTracker) {
+					const intervalMs = Math.min(1_000, Math.max(10, input.modelPerformance!.config.firstTokenTimeoutMs));
+					performanceTimer = setInterval(() => assessModelPerformance(Date.now()), intervalMs);
+					performanceTimer.unref?.();
+				}
 				const steer = created.steer.bind(created);
 				const followUp = created.followUp.bind(created);
 				created.steer = async (text) => {
@@ -687,7 +850,52 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 				});
 				if (interrupted || timedOut || stopped) abortChild();
 				checkContinuation();
-				await created.prompt(input.prompt);
+				const primaryPrompt = created.prompt(input.prompt);
+				try {
+					input.onPrimaryPromptStarted?.();
+				} catch {
+					// Background observability work must not affect the primary child request.
+				}
+				await primaryPrompt;
+				while (hardPerformanceRetry && !interrupted && !timedOut && !stopped) {
+					const retry = hardPerformanceRetry;
+					hardPerformanceRetry = undefined;
+					if (abortSettleTimer) {
+						clearTimeout(abortSettleTimer);
+						abortSettleTimer = undefined;
+					}
+					clearFinalDrainTimers();
+					clearWatchdogTailTimer();
+					cleanTerminalAssistantStopReceived = false;
+					agentSettledReceived = false;
+					messages.splice(retry.messageCount);
+					assistantError = retry.assistantError;
+					let retryAuthorized = false;
+					await created.retryCurrentResponseWithModel!(retry.action.to, (phase) => {
+						const allowed = !settled
+						&& !promptSettled
+						&& !interrupted
+						&& !timedOut
+						&& !stopped
+						&& !created.shutDown
+						&& input.timeoutSignal?.aborted !== true
+						&& input.stopSignal?.aborted !== true
+						&& (input.runDeadlineAt === undefined || Date.now() < input.runDeadlineAt)
+						&& input.canContinue?.() !== false;
+						if (allowed && phase !== "before-model" && !retryAuthorized) {
+							retryAuthorized = true;
+							recordPerformanceAttempt(retry.action);
+							expectedModelForVerification = input.modelPerformance?.verifyModel ? retry.action.to : undefined;
+							model = retry.action.to;
+							input.modelPerformance?.onSwitch?.(retry.action);
+							input.writeOutputLine(`[model performance] ${retry.action.from} stalled; retrying the incomplete response with ${retry.action.to}.`);
+						}
+						return allowed;
+					});
+					if (!retryAuthorized && !settled && !promptSettled && !interrupted && !timedOut && !stopped) {
+						throw new Error("Model performance retry was cancelled because the child lifecycle no longer permits generation.");
+					}
+				}
 				promptSettled = true;
 				settle(undefined);
 			} catch (promptError) {

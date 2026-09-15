@@ -148,6 +148,9 @@ import {
 import { findModelInfo, resolveEffectiveThinking, splitKnownThinkingSuffix } from "../../shared/model-info.ts";
 import { assertThinkingWithinCeiling } from "../../shared/thinking-ceiling.ts";
 import { resolveLaunchBinding } from "../../shared/launch-contract.ts";
+import { createModelPerformanceCacheKey, DEFAULT_MODEL_PERFORMANCE_CONFIG, ModelPerformanceStore, rankModelCandidates } from "../shared/model-performance.ts";
+import { createChildSessionModelPerformanceProbeExecutor } from "../shared/child-session-model-performance-probe.ts";
+import { warmModelPerformanceCache, type ModelPerformanceProbeResult } from "../shared/model-performance-probe.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 import { acceptanceFailureMessage, aggregateAcceptanceReport, buildSkippedAcceptanceLedger, evaluateAcceptance, formatAcceptancePrompt, resolveAcceptanceReportMode, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
@@ -660,6 +663,24 @@ function writeRunLog(
 	write(logPath, lines.join("\n"));
 }
 
+interface ModelPerformanceProbeNotice {
+	phase: "started" | "result";
+	message: string;
+	candidate?: string;
+	result?: ModelPerformanceProbeResult;
+}
+
+function formatModelPerformanceProbeResult(result: ModelPerformanceProbeResult): string {
+	if (result.status === "sampled") {
+		return `[model performance probe] ${result.candidate} sampled: ${result.observation.ttftMs.toFixed(0)}ms TTFT, ${result.observation.estimatedTokensPerSecond.toFixed(1)} tok/s.`;
+	}
+	if (result.status === "failed") {
+		const error = result.error.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 240);
+		return `[model performance probe] ${result.candidate} failed${error ? `: ${error}` : "."}`;
+	}
+	return `[model performance probe] ${result.candidate} ${result.status}.`;
+}
+
 /** Context for running a single step */
 interface SingleStepContext {
 	previousOutput: string;
@@ -702,6 +723,8 @@ interface SingleStepContext {
 	runFanoutBudget?: RunFanoutBudgetDescriptor;
 	hostAvailableBuiltins?: readonly string[];
 	onAttemptStart?: (attempt: { model?: string; thinking?: string; contextLimit?: number }) => void;
+	onModelPerformanceProbe?: (notice: ModelPerformanceProbeNotice) => void;
+	registerBackgroundTask?: (task: Promise<void>) => void;
 	onChildEvent?: (event: ChildEvent) => void;
 	onExternalProcess?: (process: ExternalProcessStatus) => void;
 	onExternalJob?: (status: ExternalJobStatus) => void;
@@ -900,6 +923,8 @@ export async function runSingleStepInner(
 			temporaryDirectories: adapterLaunch?.temporaryDirectories,
 			registerTimeout: ctx.registerTimeout,
 			registerStop: ctx.registerStop,
+			timeoutSignal: ctx.timeoutSignal,
+			stopSignal: ctx.stopSignal,
 			timeoutMessage: ctx.timeoutMessage,
 			stopMessage: ctx.stopMessage,
 			onProcess: ctx.onExternalProcess,
@@ -1027,11 +1052,25 @@ export async function runSingleStepInner(
 		alignForkedSessionCwd(step.sessionFile, effectiveCwd);
 	}
 
-	const candidates = step.modelCandidates !== undefined
+	const frozenCandidates = step.modelCandidates !== undefined
 		? step.modelCandidates.length > 0 ? step.modelCandidates : [undefined]
 		: step.model
 			? [step.model]
 			: [undefined];
+	const performanceConfig = step.modelPerformance ?? DEFAULT_MODEL_PERFORMANCE_CONFIG;
+	const performanceKey = step.modelRouting && step.modelCandidates && step.modelCandidates.length > 0
+		? createModelPerformanceCacheKey(step.modelRouting, step.modelRouting.candidates)
+		: undefined;
+	const performanceStore = performanceKey ? new ModelPerformanceStore() : undefined;
+	const initialPerformanceObservations = performanceKey && performanceStore
+		? performanceStore.read(performanceKey, performanceConfig.cacheTtlMs)
+		: [];
+	const candidates = performanceKey && performanceStore && step.modelCandidates
+		? rankModelCandidates(
+			step.modelCandidates,
+			initialPerformanceObservations,
+		)
+		: frozenCandidates;
 	const attemptedModels: string[] = [];
 	let capabilityAudit: import("../shared/capability-ceiling.ts").SubagentCapabilityAudit | undefined;
 	let launchResolvedExtensions = step.launchResolvedExtensions;
@@ -1039,6 +1078,30 @@ export async function runSingleStepInner(
 	const attemptNotes: string[] = [];
 	let finalRequiredOutputMissing: boolean | undefined;
 	const eventsPath = path.join(path.dirname(ctx.outputFile), "events.jsonl");
+	const publishModelPerformanceProbeNotice = (notice: ModelPerformanceProbeNotice): void => {
+		try {
+			fs.appendFileSync(ctx.outputFile, `${notice.message}\n`, "utf-8");
+		} catch {
+			// Probe output is human-facing observability only.
+		}
+		ctx.orcaProgressTab?.append(`${notice.message}\n`);
+		appendDiagnosticJsonl(eventsPath, JSON.stringify(omitUndefinedProperties({
+			type: notice.phase === "started"
+				? "subagent.model-performance-probe.started"
+				: "subagent.model-performance-probe.result",
+			ts: Date.now(),
+			runId: ctx.id,
+			stepIndex: ctx.flatIndex,
+			agent: step.agent,
+			candidate: notice.candidate,
+			result: notice.result,
+		})), notice.phase === "started" ? "model-performance-probe-started" : "model-performance-probe-result");
+		try {
+			ctx.onModelPerformanceProbe?.(notice);
+		} catch {
+			// A stale human-facing status observer must not affect task execution.
+		}
+	};
 	let finalResult: RunChildSessionResult | undefined;
 	let finalOutputSnapshot: SingleOutputSnapshot | undefined;
 	let structuredAcceptanceReport: unknown;
@@ -1046,6 +1109,7 @@ export async function runSingleStepInner(
 	let completionGuardTriggeredFinal = false;
 	let toolBudget = step.toolBudget ? initialToolBudgetState(step.toolBudget) : undefined;
 	let toolBudgetBlocked = false;
+	let performanceProbeStarted = false;
 	let actualLaunchContractDigest = step.launchContractDigest;
 	const mutationSnapshot = snapshotTrackedMutations(step.cwd ?? ctx.cwd);
 	let finalMutationEvidence = collectTrackedMutationEvidence(mutationSnapshot, step.cwd ?? ctx.cwd);
@@ -1166,7 +1230,7 @@ export async function runSingleStepInner(
 				inheritGlobalContext: step.inheritGlobalContext,
 				inheritSkills: step.inheritSkills,
 				task: step.launchBindingTask ?? task,
-				modelCandidates: candidates as string[],
+				modelCandidates: frozenCandidates as string[],
 				...(step.modelRouting?.modelClass ? { modelClass: step.modelRouting.modelClass } : {}),
 				...(step.modelRouting?.poolDigest ? { modelPoolDigest: step.modelRouting.poolDigest } : {}),
 				fast: step.fast,
@@ -1186,7 +1250,45 @@ export async function runSingleStepInner(
 		fs.writeFileSync(ctx.outputFile, "", "utf-8");
 		const attemptRecentTools: Array<{ tool: string; args: string; endMs: number }> = [];
 		const attemptStartedAt = Date.now();
-		const run = await runChildSession(omitUndefinedProperties({
+		const performanceCandidates = performanceKey && performanceStore && candidate
+			? candidates.filter((entry): entry is string => typeof entry === "string" && (entry === candidate || !attemptedModels.includes(entry)))
+			: undefined;
+		const startModelPerformanceProbes = (): void => {
+			if (performanceProbeStarted || !performanceKey || !performanceStore || !candidate
+				|| ctx.childSessions.supportsModelPerformanceProbes !== true) return;
+			performanceProbeStarted = true;
+			const freshCandidates = new Set(initialPerformanceObservations.map(({ candidate: observed }) => observed));
+			const probeCandidates = candidates.filter((entry): entry is string => typeof entry === "string"
+				&& entry !== candidate && !freshCandidates.has(entry));
+			if (probeCandidates.length === 0) return;
+			publishModelPerformanceProbeNotice({
+				phase: "started",
+				message: `[model performance probe] probing ${probeCandidates.length} unmeasured alternative${probeCandidates.length === 1 ? "" : "s"} in the background.`,
+			});
+			const probeTask = warmModelPerformanceCache({
+				key: performanceKey,
+				candidates: probeCandidates,
+				config: performanceConfig,
+				store: performanceStore,
+				execute: createChildSessionModelPerformanceProbeExecutor(ctx.childSessions, launch.session),
+				signal: combinedAbortSignal([ctx.timeoutSignal, ctx.stopSignal]),
+				onResult: (result) => publishModelPerformanceProbeNotice({
+					phase: "result",
+					candidate: result.candidate,
+					result,
+					message: formatModelPerformanceProbeResult(result),
+				}),
+			}).then(() => undefined, (probeError: unknown) => {
+				const message = probeError instanceof Error ? probeError.message : String(probeError);
+				publishModelPerformanceProbeNotice({
+					phase: "result",
+					message: `[model performance probe] background probe batch failed: ${message.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 240)}`,
+				});
+			});
+			ctx.registerBackgroundTask?.(probeTask);
+			void probeTask;
+		};
+		const childRun = runChildSession(omitUndefinedProperties({
 			factory: ctx.childSessions,
 			launch,
 			collectReadonlyEvidence: true,
@@ -1225,7 +1327,22 @@ export async function runSingleStepInner(
 			modelVerificationRegistry: step.modelVerificationRegistry,
 			modelResponseAliases: step.modelResponseAliases,
 			mutationTools: step.mutationTools,
+			onPrimaryPromptStarted: startModelPerformanceProbes,
+			modelPerformance: performanceCandidates && performanceKey && performanceStore && candidate ? {
+				candidates: performanceCandidates,
+				currentCandidate: candidate,
+				config: performanceConfig,
+				cacheKey: performanceKey,
+				store: performanceStore,
+				verifyModel: expectedModelForVerification !== undefined,
+				onSwitch: (action) => ctx.onAttemptStart?.(omitUndefinedProperties({
+					model: action.to,
+					thinking: resolveEffectiveThinking(action.to, step.thinking),
+					contextLimit: findModelInfo(action.to, step.modelVerificationRegistry)?.contextWindow,
+				})),
+			} : undefined,
 		}));
+		const run = await childRun;
 		// A parked run still owes completion evidence when it actually finishes.
 		// Stopped/timedOut runs already have terminal failures; checking completion evidence there is meaningless.
 		const completionDiagnosticsEligible = !run.interrupted && !run.stopped && !run.timedOut;
@@ -1350,15 +1467,21 @@ export async function runSingleStepInner(
 					: `${hiddenError.errorType} failed with exit code ${effectiveExitCode}`
 				: undefined);
 		const error = underlyingError ?? missingRequiredOutputError ?? completionEvidence.legacyFailureError;
+		if (run.performanceAttempts) modelAttempts.push(...run.performanceAttempts);
+		const settledCandidate = run.performanceCurrentCandidate ?? candidate ?? run.model ?? step.model;
 		const attempt: ModelAttempt = omitUndefinedProperties({
-			model: candidate ?? run.model ?? step.model ?? "default",
+			model: settledCandidate ?? "default",
 			success: effectiveExitCode === 0 && !error,
 			exitCode: effectiveExitCode,
 			error,
-			usage: run.usage,
+			usage: run.performanceCurrentUsage ?? run.usage,
 		});
 		modelAttempts.push(attempt);
-		if (!recoveringAbort && candidate) attemptedModels.push(candidate);
+		if (!recoveringAbort) {
+			for (const attempted of run.performanceAttemptedModels ?? (candidate ? [candidate] : [])) {
+				if (!attemptedModels.includes(attempted)) attemptedModels.push(attempted);
+			}
+		}
 		completionGuardTriggeredFinal = completionEvidence.guardTriggered && !underlyingError && !missingRequiredOutputError;
 		finalOutputSnapshot = outputSnapshot;
 		if (step.toolBudget) {
@@ -1375,7 +1498,7 @@ export async function runSingleStepInner(
 			afterCompactionSettlement: run.afterCompactionSettlement === true,
 		});
 		const fileMutationEffect = completionEvidence.fileMutation ?? (missingRequiredOutputAfterMutation ? { status: "observed" as const, expected: completionEvidence.mutationExpected, attempted: true, evidence: mutationEvidence } : undefined);
-		finalResult = { ...run, exitCode: effectiveExitCode, model: candidate ?? run.model, error, structuredOutput, runtimeAcknowledgedExtensions, ...(step.agentContract ? { agentContract: step.agentContract } : {}), ...(fileMutationEffect || settlementDiagnostic ? { effects: { ...(fileMutationEffect ? { fileMutation: fileMutationEffect } : {}), ...(settlementDiagnostic ? { settlementDiagnostic } : {}) } } : {}) } as RunChildSessionResult;
+		finalResult = { ...run, exitCode: effectiveExitCode, model: settledCandidate, error, structuredOutput, runtimeAcknowledgedExtensions, ...(step.agentContract ? { agentContract: step.agentContract } : {}), ...(fileMutationEffect || settlementDiagnostic ? { effects: { ...(fileMutationEffect ? { fileMutation: fileMutationEffect } : {}), ...(settlementDiagnostic ? { settlementDiagnostic } : {}) } } : {}) } as RunChildSessionResult;
 		const abortRecovery = !attempt.success ? planAbortRecovery({
 			messages: run.messages,
 			error,
@@ -1434,7 +1557,7 @@ export async function runSingleStepInner(
 					&& model.contextWindow >= sourceModel.contextWindow + retainedBytes + Buffer.byteLength(READONLY_CONTINUATION_PROMPT, "utf8")
 					&& model.maxTokens > 0 && model.maxTokens <= sourceModel.maxTokens;
 				return { resolved: model ? { provider: model.provider, model: model.id, api: model.api } : undefined,
-					tried: index <= modelIndex, compatibility: compatible ? "compatible" as const : "unknown" as const };
+					tried: index <= modelIndex || Boolean(reference && attemptedModels.includes(reference)), compatibility: compatible ? "compatible" as const : "unknown" as const };
 			});
 			const plan = planReadonlyModelContinuation({ source, recoveryState, candidates: resolvedCandidates, currentIndex: modelIndex,
 				lifecycleAllowsContinuation: lifecycleAllowsContinuation() && !run.interrupted && !run.stopped && !run.timedOut,
@@ -1448,13 +1571,13 @@ export async function runSingleStepInner(
 				readonlyContinuation = { source, expected: plan.expected, modelId: `${selected.provider}/${selected.model}` };
 				nextAttemptTask = plan.prompt;
 				modelIndex = plan.candidateIndex;
-				attemptNotes.push(`[readonly-continuation] ${attempt.model} returned HTTP 429 after read-only progress; continuing the retained session once with ${candidates[modelIndex]}.`);
+				if (!step.modelRouting) attemptNotes.push(`[readonly-continuation] ${attempt.model} returned HTTP 429 after read-only progress; continuing the retained session once with ${candidates[modelIndex]}.`);
 				continue;
 			}
 		}
 
 		const retryableModelFailure = isRetryableModelFailureAttempt({ error, messages: run.messages, toolCount: run.toolCount });
-		if (retryableModelFailure) recordRetryableModelFailure(candidate ?? run.model ?? step.model, error);
+		if (retryableModelFailure && !step.modelRouting) recordRetryableModelFailure(settledCandidate, error);
 		if (isContextOverflow(error)) {
 			contextOverflow = true;
 			attemptNotes.push(`[fallback] ${attempt.model} failed: context overflow — the input exceeds this model's context window. Reduce the task input or use a model with a larger context window.`);
@@ -1476,20 +1599,24 @@ export async function runSingleStepInner(
 			});
 			attempt.failureCategory = failureCategory;
 			attempt.effects = effects;
-			const selection = selectModelFailover({ category: failureCategory, currentModel: candidate, candidates: candidates as string[], currentIndex: modelIndex, effects });
-			attempt.failureDomain = selection.failureDomain;
+			const selection = selectModelFailover({ category: failureCategory, currentModel: settledCandidate, candidates: candidates as string[], currentIndex: modelIndex, effects });
 			attempt.skippedModels = selection.skippedModels.length > 0 ? selection.skippedModels : undefined;
 			if (!selection.decision.retry) {
 				attempt.retryBlockedReason = selection.decision.reason;
 				attempt.failoverReason = selection.decision.reason;
 				break modelAttemptsLoop;
 			}
-			const nextIndex = selection.nextIndex!;
+			let nextIndex = selection.nextIndex!;
+			while (nextIndex < candidates.length && candidates[nextIndex] && attemptedModels.includes(candidates[nextIndex]!)) nextIndex++;
+			if (nextIndex >= candidates.length) {
+				attempt.retryBlockedReason = "All same-class model candidates were already attempted in this run.";
+				attempt.failoverReason = attempt.retryBlockedReason;
+				break modelAttemptsLoop;
+			}
 			const nextModel = candidates[nextIndex];
 			attempt.retryMode = selection.decision.mode;
 			attempt.nextModel = nextModel;
 			attempt.failoverReason = `${failureCategory}:${selection.decision.mode}`;
-			attemptNotes.push(formatModelAttemptNote(attempt, nextModel));
 			if (selection.decision.mode === "resume") {
 				nextAttemptTask = `${task}\n\n[Model failover continuation]\nA previous same-class model attempt changed the workspace before failing. Inspect the existing session and workspace state, continue from that state, and do not repeat completed external actions.`;
 			}
@@ -1651,7 +1778,7 @@ export async function runSingleStepInner(
 		sessionFile: step.sessionFile,
 		intercomTarget: ctx.childIntercomTarget,
 		model: finalResult?.model,
-		modelRouting: step.modelRouting ? { ...step.modelRouting, candidates: [...candidates].filter((candidate): candidate is string => Boolean(candidate)) } : undefined,
+		modelRouting: step.modelRouting ? { ...step.modelRouting, candidates: [...step.modelRouting.candidates] } : undefined,
 		thinking: resolveEffectiveThinking(finalResult?.model, step.thinking),
 		attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 		modelAttempts,
@@ -1987,6 +2114,17 @@ export async function runSubagent(
 	let previousOutput = "";
 	const outputs: ChainOutputMap = {};
 	const results: StepResult[] = [];
+	const backgroundTasks = new Set<Promise<void>>();
+	const registerBackgroundTask = (task: Promise<void>): void => {
+		backgroundTasks.add(task);
+		void task.then(
+			() => backgroundTasks.delete(task),
+			() => backgroundTasks.delete(task),
+		);
+	};
+	const drainBackgroundTasks = async (): Promise<void> => {
+		while (backgroundTasks.size > 0) await Promise.allSettled([...backgroundTasks]);
+	};
 	const overallStartTime = Date.now();
 	const shareEnabled = config.share === true;
 	const asyncDir = config.asyncDir;
@@ -3022,6 +3160,13 @@ export async function runSubagent(
 		statusPayload.lastUpdate = now;
 		writeStatusPayload();
 	};
+	const updateStepModelPerformanceProbe = (flatIndex: number, notice: ModelPerformanceProbeNotice): void => {
+		const step = statusPayload.steps[flatIndex];
+		if (!step) return;
+		appendRecentStepOutput(step, [notice.message]);
+		statusPayload.lastUpdate = Date.now();
+		writeStatusPayload(false);
+	};
 	const updateStepFromChildEvent = (flatIndex: number, event: ChildEvent): void => {
 		const step = statusPayload.steps[flatIndex];
 		if (!step) return;
@@ -3760,6 +3905,8 @@ export async function runSubagent(
 					stopMessage,
 					toolTimeoutMs: task.toolTimeoutMs ?? config.toolTimeoutMs,
 					onAttemptStart: (attempt) => updateStepModel(fi, attempt.model, attempt.thinking, attempt.contextLimit),
+					onModelPerformanceProbe: (notice) => updateStepModelPerformanceProbe(fi, notice),
+					registerBackgroundTask,
 					onChildEvent: (event) => updateStepFromChildEvent(fi, event),
 					onExternalProcess: (process) => updateExternalProcess(fi, process),
 					onExternalJob: (externalJob) => updateExternalJob(fi, externalJob),
@@ -4173,6 +4320,8 @@ export async function runSubagent(
 							stopMessage,
 							toolTimeoutMs: taskForRun.toolTimeoutMs ?? config.toolTimeoutMs,
 							onAttemptStart: (attempt) => updateStepModel(fi, attempt.model, attempt.thinking, attempt.contextLimit),
+							onModelPerformanceProbe: (notice) => updateStepModelPerformanceProbe(fi, notice),
+							registerBackgroundTask,
 							onChildEvent: (event) => updateStepFromChildEvent(fi, event),
 							onExternalProcess: (process) => updateExternalProcess(fi, process),
 							onExternalJob: (externalJob) => updateExternalJob(fi, externalJob),
@@ -4546,6 +4695,7 @@ export async function runSubagent(
 			const executionStep = singleWorktreeSetup
 				? bindWorktreeCwd({ ...seqStep, cwd: singleCwd }, singleCwd)
 				: seqStep;
+			const stepStatusIndex = flatIndex;
 			let singleResult: Awaited<ReturnType<typeof runSingleStepWithTimeout>>;
 			try {
 				singleResult = await runSingleStepWithTimeout(executionStep, compactOptional<SingleStepContext>({
@@ -4575,6 +4725,8 @@ export async function runSubagent(
 				stopMessage,
 				toolTimeoutMs: seqStep.toolTimeoutMs ?? config.toolTimeoutMs,
 				onAttemptStart: (attempt) => updateStepModel(flatIndex, attempt.model, attempt.thinking, attempt.contextLimit),
+				onModelPerformanceProbe: (notice) => updateStepModelPerformanceProbe(stepStatusIndex, notice),
+				registerBackgroundTask,
 				onChildEvent: (event) => updateStepFromChildEvent(flatIndex, event),
 				onExternalProcess: (process) => updateExternalProcess(flatIndex, process),
 				onExternalJob: (externalJob) => updateExternalJob(flatIndex, externalJob),
@@ -5048,8 +5200,14 @@ export async function runSubagent(
 			...(taskIndex !== undefined && { taskIndex }),
 			...(totalTasks !== undefined && { totalTasks }),
 		}, (filePath, payload) => { writeAsyncResultFile(filePath, payload as Record<string, unknown>); });
-		// Only capacity deferral releases settled sessions before terminal publication.
-		if (!finalResultCommitted) await Promise.all([publication, disposeChildSessions()]);
+		// Publish without waiting for probes, but keep their shared child factory
+		// alive until their human-facing observations have drained.
+		if (!finalResultCommitted) {
+			if (backgroundTasks.size > 0) await publication;
+			else await Promise.all([publication, disposeChildSessions()]);
+		}
+		finalResultPublication = undefined;
+		await drainBackgroundTasks();
 	} catch (err) {
 		const message = `Failed to write result file ${resultPath}: ${err instanceof Error ? err.message : String(err)}`;
 		console.error(message, err);
@@ -5095,6 +5253,8 @@ export async function runSubagent(
 	}), (filePath, content) => runPersistence.write(filePath, { content }, (_path, payload) => {
 		fs.writeFileSync(_path, (payload as { content: string }).content, "utf-8");
 	}));
+	// A failed result publication can bypass the normal probe drain above.
+	await drainBackgroundTasks();
 	// Preserve normal-success disposal ordering, then drain remaining persistence retries.
 	await disposeChildSessions();
 	while (runPersistence.pendingCount() + indexPersistence.pendingCount() > 0) {

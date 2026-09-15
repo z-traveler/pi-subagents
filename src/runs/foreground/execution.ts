@@ -116,6 +116,20 @@ import {
 } from "../../watchdog/child-status.ts";
 import { buildInProcessChildLaunch, createReportedChildSessionInput } from "../shared/child-launch.ts";
 import { childSessionFactory, childSessionHasQueuedMessages, projectChildSessionEventForJson, type ChildSession, type ChildSessionEvent } from "../shared/child-session.ts";
+import {
+	createModelPerformanceCacheKey,
+	DEFAULT_MODEL_PERFORMANCE_CONFIG,
+	generationDeltaText,
+	ModelClassPerformanceTracker,
+	ModelPerformanceStore,
+	rankModelCandidates,
+	type ModelPerformanceSwitch,
+} from "../shared/model-performance.ts";
+import {
+	type ModelPerformanceProbeResult,
+	warmModelPerformanceCache,
+} from "../shared/model-performance-probe.ts";
+import { createChildSessionModelPerformanceProbeExecutor } from "../shared/child-session-model-performance-probe.ts";
 
 const artifactOutputByResult = new WeakMap<SingleResult, string>();
 const acceptanceOutputByResult = new WeakMap<SingleResult, string>();
@@ -191,12 +205,13 @@ function formatTimeoutMessage(timeoutMs: number): string {
 	return `Subagent timed out after ${timeoutMs}ms.`;
 }
 
-function resolveAttemptTimeout(options: RunSyncOptions): { timeoutMs: number; remainingMs: number; message: string } | undefined {
+function resolveAttemptTimeout(options: RunSyncOptions): { timeoutMs: number; remainingMs: number; deadlineAt: number; message: string } | undefined {
 	if (options.timeoutMs === undefined) return undefined;
 	const deadlineAt = options.deadlineAt ?? Date.now() + options.timeoutMs;
 	return {
 		timeoutMs: options.timeoutMs,
 		remainingMs: Math.max(0, deadlineAt - Date.now()),
+		deadlineAt,
 		message: formatTimeoutMessage(options.timeoutMs),
 	};
 }
@@ -235,6 +250,15 @@ function appendRecentOutput(progress: AgentProgress, lines: string[]): void {
 	if (progress.recentOutput.length > 50) {
 		progress.recentOutput.splice(0, progress.recentOutput.length - 50);
 	}
+}
+
+function formatChildModelPerformanceProbeResult(result: ModelPerformanceProbeResult): string {
+	if (result.status === "sampled") {
+		return `[model probe] ${result.candidate}: ${result.observation.ttftMs.toFixed(0)}ms first token, ${result.observation.estimatedTokensPerSecond.toFixed(1)} token/s.`;
+	}
+	if (result.status === "failed") return `[model probe] ${result.candidate} failed: ${result.error}`;
+	if (result.status === "timed-out") return `[model probe] ${result.candidate} timed out.`;
+	return `[model probe] ${result.candidate} was cancelled.`;
 }
 
 function stripAcceptanceReportsFromMessages(messages: Message[] | undefined): void {
@@ -364,6 +388,7 @@ async function runSingleAttempt(
 		acceptancePrompt: string;
 		resolvedSkillNames?: string[];
 		modelCandidates?: string[];
+		attemptedModelCandidates?: readonly string[];
 		skillsWarning?: string;
 		jsonlPath?: string;
 		artifactPaths?: ArtifactPaths;
@@ -382,7 +407,7 @@ async function runSingleAttempt(
 	const effectiveThinking = options.thinkingOverride ?? agent.thinking;
 	const modelArg = applyThinkingSuffix(model, effectiveThinking, options.thinkingOverride !== undefined);
 	assertThinkingWithinCeiling({ model: modelArg, configThinking: effectiveThinking, ceiling: options.thinkingCeiling, agent: agent.name, runId: options.runId });
-	const expectedModelForVerification = shared.verifyModel ? modelArg : undefined;
+	let expectedModelForVerification = shared.verifyModel ? modelArg : undefined;
 	const resolvedThinking = resolveEffectiveThinking(modelArg, effectiveThinking);
 	// Display name for the child session: applied inside the child through its
 	// runtime config and echoed back on the result payload so hosts can label
@@ -601,6 +626,47 @@ async function runSingleAttempt(
 		}
 	}
 	const childSessions = options.childSessionFactory ?? childSessionFactory();
+	const performanceConfig = options.modelPerformance ?? DEFAULT_MODEL_PERFORMANCE_CONFIG;
+	const performanceCandidates = options.modelRouting ? shared.modelCandidates ?? [] : [];
+	const performanceKey = options.modelRouting && performanceCandidates.length > 0
+		? createModelPerformanceCacheKey(options.modelRouting, performanceCandidates)
+		: undefined;
+	const performanceStore = performanceKey ? new ModelPerformanceStore() : undefined;
+	const performanceTracker = performanceKey && modelArg
+		? new ModelClassPerformanceTracker({
+			candidates: performanceCandidates,
+			currentCandidate: modelArg,
+			attemptedCandidates: shared.attemptedModelCandidates,
+			config: performanceConfig,
+			observations: () => performanceStore!.read(performanceKey, performanceConfig.cacheTtlMs),
+		})
+		: undefined;
+	const performanceAttempts: ModelAttempt[] = [];
+	const performanceAttemptedModels = modelArg ? [modelArg] : [];
+	const performanceUsage = new Map<string, Usage>();
+	const usageForPerformanceModel = (candidate: string): Usage => {
+		let usage = performanceUsage.get(candidate);
+		if (!usage) {
+			usage = emptyUsage();
+			performanceUsage.set(candidate, usage);
+		}
+		return usage;
+	};
+	const recordPerformanceAttempt = (action: ModelPerformanceSwitch): void => {
+		performanceAttempts.push({
+			model: action.from,
+			success: false,
+			exitCode: null,
+			error: action.severity === "hard"
+				? "Generation was too slow; the incomplete response was discarded."
+				: "Generation was slow; the completed response was retained.",
+			usage: { ...(performanceUsage.get(action.from) ?? emptyUsage()) },
+			retryMode: action.severity === "hard" ? "restart" : "resume",
+			nextModel: action.to,
+			failoverReason: `performance:${action.severity}`,
+		});
+		if (!performanceAttemptedModels.includes(action.to)) performanceAttemptedModels.push(action.to);
+	};
 	let afterCompactionSettlement = false;
 	const exitCode = await new Promise<number>((resolve) => {
 		const jsonlWriter = createJsonlWriter(shared.jsonlPath, { pause() {}, resume() {} });
@@ -616,6 +682,16 @@ async function runSingleAttempt(
 		let activityTimer: NodeJS.Timeout | undefined;
 		let timeoutTimer: NodeJS.Timeout | undefined;
 		let timeoutHardFinishTimer: NodeJS.Timeout | undefined;
+		let activePerformanceCandidate = modelArg;
+		let performancePaused = false;
+		let performanceSwitchSupported = false;
+		let hardPerformanceRetry: {
+			action: ModelPerformanceSwitch;
+			messageCount: number;
+			recentOutput: string[];
+			assistantError?: string;
+		} | undefined;
+		let pendingSoftPerformanceSwitch: ModelPerformanceSwitch | undefined;
 		const clearTimeoutTimers = () => {
 			if (timeoutTimer) {
 				clearTimeout(timeoutTimer);
@@ -999,6 +1075,21 @@ async function runSingleAttempt(
 			emitUpdateSnapshot(output || "(running...)");
 		};
 
+		const assessModelPerformance = (now: number): void => {
+			if (!performanceTracker || performancePaused || !performanceSwitchSupported || sessionSettled || lifecycleFinished) return;
+			const assessment = performanceTracker.assess(now);
+			if (assessment.level !== "hard") return;
+			if (activePerformanceCandidate && performanceKey) performanceStore?.invalidate(performanceKey, activePerformanceCandidate);
+			if (!assessment.switch || hardPerformanceRetry || !session?.retryCurrentResponseWithModel) return;
+			hardPerformanceRetry = {
+				action: assessment.switch,
+				messageCount: result.messages?.length ?? 0,
+				recentOutput: [...progress.recentOutput],
+				assistantError,
+			};
+			abortChild();
+		};
+
 		const processEvent = (evt: ChildSessionEvent & { message?: Message; toolName?: string; toolCallId?: string; args?: unknown; willRetry?: unknown }) => {
 			if (lifecycleFinished) return;
 			jsonlWriter.writeLine(JSON.stringify(projectChildSessionEventForJson(evt)));
@@ -1060,6 +1151,24 @@ async function runSingleAttempt(
 			}
 
 			const now = Date.now();
+			if (performanceTracker) {
+				if (evt.type === "auto_retry_start") performancePaused = true;
+				if (evt.type === "auto_retry_end") {
+					performancePaused = false;
+					activePerformanceCandidate = performanceTracker.currentCandidate;
+					performanceTracker.startResponse(now);
+				}
+				if (evt.type === "turn_start") {
+					performancePaused = false;
+					activePerformanceCandidate = performanceTracker.currentCandidate;
+					performanceTracker.startResponse(now);
+				}
+				if (evt.type === "message_update" && !performancePaused) {
+					const delta = generationDeltaText(evt.assistantMessageEvent);
+					if (delta) performanceTracker.recordDelta(delta, now);
+					assessModelPerformance(now);
+				}
+			}
 			progress.durationMs = now - startTime;
 			progress.lastActivityAt = now;
 			updateActivityState(now);
@@ -1114,6 +1223,10 @@ async function runSingleAttempt(
 						? evt.message.content.filter((part) => (part as { type?: string }).type === "toolCall")
 						: [];
 					const hasToolCall = toolCalls.length > 0;
+					const responsePerformanceUsage = activePerformanceCandidate
+						? usageForPerformanceModel(activePerformanceCandidate)
+						: undefined;
+					if (responsePerformanceUsage) responsePerformanceUsage.turns++;
 					const terminalAssistantStop = (evt.message as { stopReason?: string }).stopReason === "stop" && !hasToolCall;
 					const u = evt.message.usage;
 					if (u) {
@@ -1123,6 +1236,13 @@ async function runSingleAttempt(
 						result.usage.cacheRead += u.cacheRead || 0;
 						result.usage.cacheWrite += u.cacheWrite || 0;
 						result.usage.cost += u.cost?.total || 0;
+						if (responsePerformanceUsage) {
+							responsePerformanceUsage.input += u.input || 0;
+							responsePerformanceUsage.output += u.output || 0;
+							responsePerformanceUsage.cacheRead += u.cacheRead || 0;
+							responsePerformanceUsage.cacheWrite += u.cacheWrite || 0;
+							responsePerformanceUsage.cost += u.cost?.total || 0;
+						}
 						progress.tokens = result.usage.input + result.usage.output;
 						progress.inputTokens = result.usage.input;
 						progress.outputTokens = result.usage.output;
@@ -1144,6 +1264,24 @@ async function runSingleAttempt(
 					}
 					const assistantText = extractTextFromContent(evt.message.content);
 					appendRecentOutput(progress, assistantText.split("\n").slice(-10));
+					if (performanceTracker && !performancePaused) {
+						const completedPerformance = performanceTracker.completeResponse(
+							now,
+							hasToolCall && Boolean(session?.switchModelForNextResponse),
+						);
+						if (completedPerformance.sample && activePerformanceCandidate && performanceKey) {
+							performanceStore?.record(performanceKey, {
+								candidate: activePerformanceCandidate,
+								recordedAt: now,
+								ttftMs: completedPerformance.sample.ttftMs,
+								estimatedTokensPerSecond: completedPerformance.sample.estimatedTokensPerSecond,
+								source: "run",
+							}, performanceConfig.cacheTtlMs);
+						}
+						if (completedPerformance.switch && session?.switchModelForNextResponse) {
+							pendingSoftPerformanceSwitch = completedPerformance.switch;
+						}
+					}
 					// Final assistant message: start the settle drain window.
 					if (terminalAssistantStop) {
 						if (!evt.message.errorMessage && assistantText.trim()) assistantError = undefined;
@@ -1156,6 +1294,23 @@ async function runSingleAttempt(
 					}
 				}
 				updateActivityState(now);
+				fireUpdate();
+			}
+
+			if (evt.type === "turn_end" && pendingSoftPerformanceSwitch && session?.switchModelForNextResponse) {
+				const action = pendingSoftPerformanceSwitch;
+				pendingSoftPerformanceSwitch = undefined;
+				recordPerformanceAttempt(action);
+				expectedModelForVerification = shared.verifyModel ? action.to : undefined;
+				result.model = action.to;
+				progress.model = action.to;
+				appendRecentOutput(progress, [`[model performance] ${action.from} was slow; next response will use ${action.to}.`]);
+				void session.switchModelForNextResponse(action.to).catch((error) => {
+					const message = error instanceof Error ? error.message : String(error);
+					result.error = `Unable to switch slow model response: ${message}`;
+					assistantError = result.error;
+					abortChild();
+				});
 				fireUpdate();
 			}
 
@@ -1209,14 +1364,16 @@ async function runSingleAttempt(
 		onWatchdogStatus = (event) => processEvent(event as unknown as Parameters<typeof processEvent>[0]);
 
 		fireUpdate();
-		if (controlConfig.enabled || options.onUpdate) {
+		if (controlConfig.enabled || options.onUpdate || performanceTracker) {
 			activityTimer = setInterval(() => {
 				if (sessionSettled || lifecycleFinished) {
 					return;
 				}
-				updateActivityState(Date.now());
+				const now = Date.now();
+				updateActivityState(now);
+				assessModelPerformance(now);
 				fireUpdate();
-			}, 1000);
+			}, performanceTracker ? Math.min(1_000, Math.max(10, performanceConfig.firstTokenTimeoutMs)) : 1_000);
 			activityTimer.unref?.();
 		}
 
@@ -1398,6 +1555,7 @@ async function runSingleAttempt(
 					return;
 				}
 				session = created;
+				performanceSwitchSupported = typeof created.retryCurrentResponseWithModel === "function";
 				const steer = created.steer.bind(created);
 				const followUp = created.followUp.bind(created);
 				created.steer = async (text) => {
@@ -1418,7 +1576,83 @@ async function runSingleAttempt(
 				if (shared.readonlyExpected && (!actualReadonlyModel || actualReadonlyModel.fullId !== shared.readonlyModel
 					|| actualReadonlyModel.api !== shared.readonlyExpected.api || created.modelId !== shared.readonlyModel || abortedBySignal || interruptedByControl || result.timedOut
 					|| !shared.readonlyHandoffAllowed?.())) throw new Error("Read-only continuation handoff vetoed.");
-				await created.prompt(`Task: ${task}`);
+				const primaryPrompt = created.prompt(`Task: ${task}`);
+				if (performanceKey && performanceStore && modelArg && childSessions.supportsModelPerformanceProbes === true) {
+					const fresh = new Set(performanceStore.read(performanceKey, performanceConfig.cacheTtlMs).map(({ candidate }) => candidate));
+					const probeCandidates = performanceCandidates.filter((candidate) => candidate !== modelArg
+						&& !shared.attemptedModelCandidates?.includes(candidate)
+						&& !fresh.has(candidate));
+					if (probeCandidates.length > 0) {
+						appendRecentOutput(progress, [`[model probe] benchmarking ${probeCandidates.join(", ")} in the background.`]);
+						fireUpdate();
+						void warmModelPerformanceCache({
+							key: performanceKey,
+							candidates: probeCandidates,
+							config: performanceConfig,
+							store: performanceStore,
+							execute: createChildSessionModelPerformanceProbeExecutor(childSessions, input),
+							signal: options.signal,
+							onResult: (probeResult) => {
+								const message = formatChildModelPerformanceProbeResult(probeResult);
+								appendRecentOutput(progress, [message]);
+								fireUpdate();
+								if (!options.onUpdate || sessionSettled || lifecycleFinished) {
+									try {
+										options.onModelPerformanceProbe?.(message, probeResult.status === "sampled" ? "info" : "warning");
+									} catch {
+										// A stale human-facing observer must not affect task execution.
+									}
+								}
+							},
+						}).catch((error) => {
+							const message = `[model probe] background benchmark failed: ${error instanceof Error ? error.message : String(error)}`;
+							appendRecentOutput(progress, [message]);
+							fireUpdate();
+							if (!options.onUpdate || sessionSettled || lifecycleFinished) {
+								try {
+									options.onModelPerformanceProbe?.(message, "warning");
+								} catch {
+									// A stale human-facing observer must not affect task execution.
+								}
+							}
+						});
+					}
+				}
+				await primaryPrompt;
+				while (hardPerformanceRetry && !abortedBySignal && !interruptedByControl && !result.timedOut) {
+					const retry = hardPerformanceRetry;
+					hardPerformanceRetry = undefined;
+					result.messages?.splice(retry.messageCount);
+					progress.recentOutput = [...retry.recentOutput];
+					assistantError = retry.assistantError;
+					let retryAuthorized = false;
+					await created.retryCurrentResponseWithModel!(retry.action.to, (phase) => {
+						const allowed = !lifecycleFinished
+						&& !sessionSettled
+						&& !detached
+						&& !abortedBySignal
+						&& !interruptedByControl
+						&& !result.stopped
+						&& !result.timedOut
+						&& !created.shutDown
+						&& options.signal?.aborted !== true
+						&& options.interruptSignal?.aborted !== true
+						&& (attemptTimeout === undefined || Date.now() < attemptTimeout.deadlineAt);
+						if (allowed && phase !== "before-model" && !retryAuthorized) {
+							retryAuthorized = true;
+							recordPerformanceAttempt(retry.action);
+							expectedModelForVerification = shared.verifyModel ? retry.action.to : undefined;
+							result.model = retry.action.to;
+							progress.model = retry.action.to;
+							appendRecentOutput(progress, [`[model performance] ${retry.action.from} stalled; retrying the incomplete response with ${retry.action.to}.`]);
+						}
+						return allowed;
+					});
+					if (!retryAuthorized && !lifecycleFinished && !sessionSettled && !detached
+						&& !abortedBySignal && !interruptedByControl && !result.stopped && !result.timedOut) {
+						throw new Error("Model performance retry was cancelled because the child lifecycle no longer permits generation.");
+					}
+				}
 				settle(undefined);
 			} catch (error) {
 				settle(error ?? new Error("Child session failed."));
@@ -1426,6 +1660,8 @@ async function runSingleAttempt(
 		})();
 	});
 	result.exitCode = exitCode;
+	if (performanceAttempts.length > 0) result.modelAttempts = performanceAttempts;
+	if (performanceAttemptedModels.length > 1) result.attemptedModels = performanceAttemptedModels;
 	if (afterCompactionSettlement) {
 		(result as AbortRecoverySingleResult)[AFTER_COMPACTION_SETTLEMENT] = true;
 	}
@@ -1822,12 +2058,19 @@ async function runSyncCompletionInner(
 			origin: options.modelOrigin ?? (options.modelOverrideFromParent ? "inherited" : "configured"),
 		},
 	);
-	const candidates = applyThinkingToModelCandidates(
+	const frozenCandidates = applyThinkingToModelCandidates(
 		configuredCandidates,
 		options.thinkingOverride ?? agent.thinking,
 		options.thinkingOverride !== undefined,
 		options.modelRouting?.modelClass,
 	);
+	let candidates = frozenCandidates;
+	if (options.modelRouting) {
+		const performanceConfig = options.modelPerformance ?? DEFAULT_MODEL_PERFORMANCE_CONFIG;
+		const performanceKey = createModelPerformanceCacheKey(options.modelRouting, candidates);
+		const observations = new ModelPerformanceStore().read(performanceKey, performanceConfig.cacheTtlMs);
+		candidates = rankModelCandidates(candidates, observations);
+	}
 	if (options.workflowChildPermitLaunch && candidates.length > 1) {
 		const error = "Workflow child permit does not support model fallback.";
 		return redactResultPrompt(withRunContext({
@@ -1856,6 +2099,7 @@ async function runSyncCompletionInner(
 		}, options.context));
 	}
 	const attemptedModels: string[] = [];
+	const attemptedCandidateSet = new Set<string>();
 	const modelAttempts: ModelAttempt[] = [];
 	const aggregateUsage = emptyUsage();
 	const attemptNotes: string[] = [];
@@ -1944,6 +2188,7 @@ async function runSyncCompletionInner(
 	let nextAttemptTask = task;
 	modelAttemptsLoop: for (let modelIndex = 0; modelIndex < modelsToTry.length; modelIndex++) {
 		const candidate = modelsToTry[modelIndex];
+		if (candidate && attemptedCandidateSet.has(candidate)) continue;
 		// The inner loop re-runs the same candidate at most once, for abort recovery.
 		for (;;) {
 			const recoveringAbort = recoveryState === "abort-recovery";
@@ -1961,7 +2206,8 @@ async function runSyncCompletionInner(
 				artifactPaths: artifactPathsResult,
 				transcriptWriter,
 				attemptNotes,
-				modelCandidates: candidates,
+				modelCandidates: frozenCandidates,
+				attemptedModelCandidates: [...attemptedCandidateSet],
 				outputSnapshot,
 				originalTask: task,
 				orcaProgressTab,
@@ -1973,19 +2219,34 @@ async function runSyncCompletionInner(
 			});
 			lastResult = result;
 			if (!recoveringAbort) {
-				if (result.model) attemptedModels.push(result.model);
-				else if (candidate) attemptedModels.push(candidate);
+				const attemptedInRun = result.attemptedModels ?? (result.model ? [result.model] : candidate ? [candidate] : []);
+				for (const attempted of attemptedInRun) {
+					if (!attemptedModels.includes(attempted)) attemptedModels.push(attempted);
+					if (candidates.includes(attempted)) attemptedCandidateSet.add(attempted);
+				}
 			}
 			sumUsage(aggregateUsage, result.usage);
 			totalToolCount += result.progressSummary?.toolCount ?? 0;
 			totalDurationMs += result.progressSummary?.durationMs ?? 0;
 			const attemptSucceeded = result.exitCode === 0 && !result.error;
+			const inSessionAttempts = result.modelAttempts ?? [];
+			modelAttempts.push(...inSessionAttempts);
+			const finalAttemptUsage = { ...result.usage };
+			for (const inSessionAttempt of inSessionAttempts) {
+				if (!inSessionAttempt.usage) continue;
+				finalAttemptUsage.input -= inSessionAttempt.usage.input;
+				finalAttemptUsage.output -= inSessionAttempt.usage.output;
+				finalAttemptUsage.cacheRead -= inSessionAttempt.usage.cacheRead;
+				finalAttemptUsage.cacheWrite -= inSessionAttempt.usage.cacheWrite;
+				finalAttemptUsage.cost -= inSessionAttempt.usage.cost;
+				finalAttemptUsage.turns -= inSessionAttempt.usage.turns;
+			}
 			const attempt: ModelAttempt = {
 				model: result.model ?? candidate ?? agent.model ?? "default",
 				success: attemptSucceeded,
 				exitCode: result.exitCode,
 				error: result.error,
-				usage: { ...result.usage },
+				usage: finalAttemptUsage,
 			};
 			modelAttempts.push(attempt);
 			// A consumed retained continuation is terminal even on a startup error or abort.
@@ -2067,7 +2328,7 @@ async function runSyncCompletionInner(
 			if (attemptSucceeded) break modelAttemptsLoop;
 
 			const retryableModelFailure = isRetryableModelFailureAttempt({ error: result.error, messages: result.messages, toolCount: result.progressSummary?.toolCount });
-			if (retryableModelFailure) recordRetryableModelFailure(result.model ?? candidate, result.error);
+			if (retryableModelFailure && !options.modelRouting) recordRetryableModelFailure(result.model ?? candidate, result.error);
 			if (isContextOverflow(result.error)) {
 				result.contextOverflow = true;
 				attemptNotes.push(`[fallback] ${attempt.model} failed: context overflow — the input exceeds this model's context window. Reduce the task input or use a model with a larger context window.`);
@@ -2092,16 +2353,22 @@ async function runSyncCompletionInner(
 				});
 				attempt.failureCategory = failureCategory;
 				attempt.effects = effects;
-				const selection = selectModelFailover({ category: failureCategory, currentModel: candidate, candidates, currentIndex: modelIndex, effects });
-				attempt.failureDomain = selection.failureDomain;
+				const nextIndex = candidates.findIndex((nextCandidate, index) => index > modelIndex && !attemptedCandidateSet.has(nextCandidate));
+				const nextModel = nextIndex >= 0 ? candidates[nextIndex] : undefined;
+				const selectionCandidates = nextModel ? [result.model ?? candidate ?? "default", nextModel] : [result.model ?? candidate ?? "default"];
+				const selection = selectModelFailover({
+					category: failureCategory,
+					currentModel: result.model ?? candidate,
+					candidates: selectionCandidates,
+					currentIndex: 0,
+					effects,
+				});
 				attempt.skippedModels = selection.skippedModels.length > 0 ? selection.skippedModels : undefined;
 				if (!selection.decision.retry) {
 					attempt.retryBlockedReason = selection.decision.reason;
 					attempt.failoverReason = selection.decision.reason;
 					break modelAttemptsLoop;
 				}
-				const nextIndex = selection.nextIndex!;
-				const nextModel = candidates[nextIndex];
 				attempt.retryMode = selection.decision.mode;
 				attempt.nextModel = nextModel;
 				attempt.failoverReason = `${failureCategory}:${selection.decision.mode}`;
@@ -2132,7 +2399,7 @@ async function runSyncCompletionInner(
 	result.usage = aggregateUsage;
 	result.attemptedModels = attemptedModels.length > 0 ? attemptedModels : undefined;
 	result.modelAttempts = modelAttempts.length > 0 ? modelAttempts : undefined;
-	result.modelRouting = options.modelRouting ? { ...options.modelRouting, candidates: [...candidates] } : undefined;
+	result.modelRouting = options.modelRouting ? { ...options.modelRouting, candidates: [...frozenCandidates] } : undefined;
 	result.progressSummary = {
 		...(childSessionName ? { sessionName: childSessionName } : {}),
 		toolCount: totalToolCount,

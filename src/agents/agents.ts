@@ -25,6 +25,7 @@ import { validateAcceptanceInput } from "../runs/shared/acceptance.ts";
 import { validatePermissionRules, type PermissionRules } from "../runs/shared/permissions.ts";
 import { parseThinkingLevel, type ThinkingLevel } from "../shared/thinking-ceiling.ts";
 import { mergeModelPools, parseModelClass, parseModelPools, type ModelPools, type ModelPoolSources } from "../shared/model-routing.ts";
+import { parseModelPerformanceConfig, resolveModelPerformanceConfig, type ModelPerformanceConfig, type ModelPerformanceConfigOverride } from "../runs/shared/model-performance.ts";
 
 export type AgentScope = "user" | "project" | "both";
 
@@ -201,6 +202,7 @@ interface SubagentSettings {
 	providerOverrides: Record<string, Record<string, BuiltinAgentOverrideConfig>>;
 	agentScanDirs?: string[];
 	modelPools?: ModelPools;
+	modelPerformance?: ModelPerformanceConfigOverride;
 	defaultModel?: string;
 	defaultProvider?: string;
 	defaultThinking?: string;
@@ -323,6 +325,7 @@ export interface AgentDiscoveryResult {
 	modelScope?: ModelScopeConfig;
 	modelPools?: ModelPools;
 	modelPoolSources?: ModelPoolSources;
+	modelPerformance?: ModelPerformanceConfig;
 	maxThinking?: ThinkingLevel;
 }
 
@@ -1217,6 +1220,7 @@ function readSubagentSettings(filePath: string | null): SubagentSettings {
 	}
 	const modelScope = parseModelScopeConfig(subagentsObject.modelScope, { filePath });
 	const modelPools = parseModelPools(subagentsObject.modelPools, filePath);
+	const modelPerformance = parseModelPerformanceConfig(subagentsObject.modelPerformance, filePath);
 
 	const parsed: Record<string, BuiltinAgentOverrideConfig> = {};
 	const providerOverrides: Record<string, Record<string, BuiltinAgentOverrideConfig>> = {};
@@ -1235,6 +1239,7 @@ function readSubagentSettings(filePath: string | null): SubagentSettings {
 		...(disableThinking !== undefined ? { disableThinking } : {}),
 		...(modelScope !== undefined ? { modelScope } : {}),
 		...(modelPools !== undefined ? { modelPools } : {}),
+		...(modelPerformance !== undefined ? { modelPerformance } : {}),
 	};
 	if (agentOverrides && typeof agentOverrides === "object" && !Array.isArray(agentOverrides)) {
 		for (const [name, value] of Object.entries(agentOverrides)) {
@@ -2376,6 +2381,7 @@ export interface AgentDiscoveryAllResult {
 	projectSettingsPath: string | null;
 	modelPools?: ModelPools;
 	modelPoolSources?: ModelPoolSources;
+	modelPerformance?: ModelPerformanceConfig;
 	maxThinking?: ThinkingLevel;
 }
 
@@ -2652,6 +2658,7 @@ function configuredAgentsForScope(sources: AgentDiscoverySources, scope: AgentSc
 	modelScope?: ModelScopeConfig;
 	modelPools?: ModelPools;
 	modelPoolSources?: ModelPoolSources;
+	modelPerformance?: ModelPerformanceConfig;
 } {
 	const { user: userSettings, project: projectSettings } = settingsForScope(sources, settingsScope);
 	const defaultProvider = resolveSubagentDefaultProvider(userSettings, projectSettings, sources.projectSettingsPath);
@@ -2660,6 +2667,9 @@ function configuredAgentsForScope(sources: AgentDiscoverySources, scope: AgentSc
 	const maxThinking = resolveSubagentMaxThinking(userSettings, projectSettings, sources.projectSettingsPath);
 	const defaultExtensions = resolveSubagentDefaultExtensions(userSettings, projectSettings, sources.projectSettingsPath);
 	const mergedModelPools = mergeModelPools(userSettings.modelPools, projectSettings.modelPools, sources.userSettingsPath, sources.projectSettingsPath);
+	const modelPerformance = userSettings.modelPerformance || projectSettings.modelPerformance
+		? resolveModelPerformanceConfig(userSettings.modelPerformance, projectSettings.modelPerformance)
+		: undefined;
 	const applyDefaults = (agents: AgentConfig[]): AgentConfig[] => applySubagentDefaults(agents, defaultModel, defaultProvider, defaultThinking, defaultExtensions);
 	const builtin = applyBuiltinOverrides(applyDefaults(sources.builtinLoaded.agents), userSettings, projectSettings, sources.userSettingsPath, sources.projectSettingsPath);
 	const user = applyCustomAgentOverrides(
@@ -2689,6 +2699,7 @@ function configuredAgentsForScope(sources: AgentDiscoverySources, scope: AgentSc
 		modelScope: projectSettings.modelScope ?? userSettings.modelScope,
 		...(mergedModelPools.pools ? { modelPools: mergedModelPools.pools } : {}),
 		...(mergedModelPools.sources ? { modelPoolSources: mergedModelPools.sources } : {}),
+		...(modelPerformance ? { modelPerformance } : {}),
 	};
 }
 
@@ -2738,6 +2749,7 @@ function buildEffectiveDiscovery(sources: AgentDiscoverySources, scope: AgentSco
 		...(configured.modelScope !== undefined ? { modelScope: configured.modelScope } : {}),
 		...(configured.modelPools ? { modelPools: configured.modelPools } : {}),
 		...(configured.modelPoolSources ? { modelPoolSources: configured.modelPoolSources } : {}),
+		...(configured.modelPerformance ? { modelPerformance: configured.modelPerformance } : {}),
 		...(configured.maxThinking !== undefined ? { maxThinking: configured.maxThinking } : {}),
 	};
 }
@@ -2783,6 +2795,7 @@ function buildAllDiscovery(sources: AgentDiscoverySources, includeChains: boolea
 		projectSettingsPath: sources.projectSettingsPath,
 		...(configured.modelPools ? { modelPools: configured.modelPools } : {}),
 		...(configured.modelPoolSources ? { modelPoolSources: configured.modelPoolSources } : {}),
+		...(configured.modelPerformance ? { modelPerformance: configured.modelPerformance } : {}),
 		...(configured.maxThinking !== undefined ? { maxThinking: configured.maxThinking } : {}),
 	};
 }
@@ -2814,6 +2827,9 @@ function discoverAgentsUncached(cwd: string, scope: AgentScope, preferredModelPr
 	const defaultExtensions = resolveSubagentDefaultExtensions(userSettings, projectSettings, projectSettingsPath);
 	const modelScope = projectSettings.modelScope ?? userSettings.modelScope;
 	const mergedModelPools = mergeModelPools(userSettings.modelPools, projectSettings.modelPools, userSettingsPath, projectSettingsPath);
+	const modelPerformance = userSettings.modelPerformance || projectSettings.modelPerformance
+		? resolveModelPerformanceConfig(userSettings.modelPerformance, projectSettings.modelPerformance)
+		: undefined;
 	const packageSubagentPaths = collectPackageSubagentPaths(effectiveCwd, { includeUser: scope !== "project", includeProject: scope !== "user" });
 	const directories: AgentDefinitionDirectoryReport[] = [reportAgentDefinitionDirectory("builtin", BUILTIN_AGENTS_DIR, BUILTIN_AGENT_DEFINITION_INSPECTION)];
 	const builtinLoaded = loadAgentsFromDefinitionFiles(BUILTIN_AGENT_DEFINITION_FILES, "builtin");
@@ -2849,6 +2865,7 @@ function discoverAgentsUncached(cwd: string, scope: AgentScope, preferredModelPr
 		...(modelScope !== undefined ? { modelScope } : {}),
 		...(mergedModelPools.pools ? { modelPools: mergedModelPools.pools } : {}),
 		...(mergedModelPools.sources ? { modelPoolSources: mergedModelPools.sources } : {}),
+		...(modelPerformance ? { modelPerformance } : {}),
 		...(maxThinking !== undefined ? { maxThinking } : {}),
 	};
 }

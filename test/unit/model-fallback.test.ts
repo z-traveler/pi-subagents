@@ -443,6 +443,19 @@ describe("model fallback helpers", () => {
 		}
 	});
 
+	it("does not apply cross-task cached exclusions to a model-class pool", () => {
+		recordModelFailure({ modelId: "gpt-5-mini", provider: "openai", reason: "quota exceeded" });
+		recordModelFailure({ modelId: "claude-sonnet-4", provider: "anthropic", reason: "authentication failed" });
+
+		const routing = resolveModelRouting({
+			explicitModelClass: "smart",
+			modelPools: { smart: ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"] },
+			availableModels,
+		});
+
+		assert.deepEqual(routing.modelCandidates, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
+	});
+
 	it("bounds and sanitizes excluded-candidate evidence", () => {
 		const warnings: string[] = [];
 		const originalWarn = console.warn;
@@ -499,6 +512,10 @@ describe("model fallback helpers", () => {
 		assert.equal(isRetryableModelFailure("The usage limit has been reached"), true);
 		assert.equal(isRetryableModelFailure("model unavailable"), true);
 		assert.equal(isRetryableModelFailure("authentication failed"), true);
+		assert.equal(isRetryableModelFailure("HTTP 401"), true);
+		assert.equal(isRetryableModelFailure("HTTP 403"), true);
+		assert.equal(isRetryableModelFailure("401"), true);
+		assert.equal(isRetryableModelFailure("403: forbidden"), true);
 		assert.equal(isRetryableModelFailure("Subagent produced no output (possible model cold-start or empty response)."), true);
 		assert.equal(isRetryableModelFailure("model load failed"), true);
 		assert.equal(isRetryableModelFailure("Stream ended without finish_reason"), true);
@@ -560,7 +577,7 @@ describe("model fallback helpers", () => {
 		assert.equal(classifyModelFailure({ error: "429", acceptanceRejected: true }), "tool");
 	});
 
-	it("classifies failures and restricts failure-domain retries to another provider", () => {
+	it("classifies provider access failures and allows the next same-provider candidate", () => {
 		assert.equal(classifyModelFailure({ error: "authentication failed" }), "failure-domain");
 		assert.equal(classifyModelFailure({ error: "HTTP 401" }), "failure-domain");
 		assert.equal(classifyModelFailure({ error: "HTTP 403" }), "failure-domain");
@@ -571,20 +588,19 @@ describe("model fallback helpers", () => {
 		assert.equal(classifyModelFailure({ error: "content policy refusal" }), "policy");
 		assert.equal(classifyModelFailure({ error: "bash failed (exit 1): timeout" }), "tool");
 		assert.equal(classifyModelFailure({ error: "rate limit exceeded" }), "transient");
-		assert.equal(decideModelFailover({ category: "failure-domain", currentModel: "openai/a", nextModel: "openai/b", effects: "none" }).retry, false);
+		assert.equal(decideModelFailover({ category: "failure-domain", currentModel: "openai/a", nextModel: "openai/b", effects: "none" }).retry, true);
 		assert.equal(decideModelFailover({ category: "failure-domain", currentModel: "openai/a", nextModel: "anthropic/b", effects: "none" }).retry, true);
 	});
 
-	it("records skipped same-domain candidates during failure-domain selection", () => {
+	it("selects the next candidate without treating provider as a failure domain", () => {
 		const selected = selectModelFailover({ category: "failure-domain", currentModel: "provider/first", candidates: ["provider/first", "provider/second", "other/third"], currentIndex: 0, effects: "none" });
-		assert.deepEqual(selected.skippedModels, ["provider/second"]);
-		assert.equal(selected.nextIndex, 2);
+		assert.deepEqual(selected.skippedModels, []);
+		assert.equal(selected.nextIndex, 1);
 		assert.deepEqual(selected.decision, { retry: true, mode: "restart" });
-		assert.equal(selected.failureDomain, "provider");
 
 		const exhausted = selectModelFailover({ category: "failure-domain", currentModel: "provider/first", candidates: ["provider/first", "provider/second"], currentIndex: 0, effects: "none" });
-		assert.deepEqual(exhausted.skippedModels, ["provider/second"]);
-		assert.deepEqual(exhausted.decision, { retry: false, reason: "no-candidate" });
+		assert.deepEqual(exhausted.skippedModels, []);
+		assert.deepEqual(exhausted.decision, { retry: true, mode: "restart" });
 	});
 
 	it("blocks failover after external effects and resumes workspace effects", () => {

@@ -9,6 +9,7 @@
  * across every child it creates.
  */
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "../../shared/utils.ts";
 import type { ChildRuntimeConfig } from "./child-runtime-config.ts";
@@ -57,6 +58,8 @@ export interface ChildSessionLaunch {
 	storage: ChildSessionStorage;
 	/** Model reference as the agent config names it (`provider/id`, optionally `:thinking`). */
 	model?: string;
+	/** Internal output cap for bounded tool-free requests such as performance probes. */
+	maxOutputTokens?: number;
 	/** Explicit tool allowlist; undefined keeps pi's defaults. */
 	tools?: string[];
 	excludeTools?: string[];
@@ -91,6 +94,14 @@ export interface ChildSession {
 	steer(text: string): Promise<void>;
 	followUp(text: string): Promise<void>;
 	abort(): Promise<void>;
+	/** Change the model used by later responses without changing parent-visible input. The change must take effect before this method returns its promise. */
+	switchModelForNextResponse?(model: string): Promise<void>;
+	/**
+	 * Retry the currently aborted response from its pre-response session checkpoint.
+	 * The lifecycle guard is checked after navigation and again immediately before
+	 * starting the replacement provider request.
+	 */
+	retryCurrentResponseWithModel?(model: string, canContinue?: (phase?: "before-model" | "before-generation") => boolean): Promise<void>;
 	/** Emits `session_shutdown` to the child's extensions and disposes the session; resolves once that shutdown work is done. */
 	dispose(): Promise<void>;
 	/** True while Pi still has steering or follow-up input that has not started a turn. */
@@ -114,6 +125,8 @@ export function childSessionHasQueuedMessages(session: ChildSession | undefined)
 }
 
 export interface ChildSessionFactory {
+	/** The factory can launch isolated, tool-free memory sessions for background model probes. */
+	readonly supportsModelPerformanceProbes?: boolean;
 	create(launch: ChildSessionLaunch): Promise<ChildSession>;
 	/** Abort and dispose every live attached child; detached children keep running and hold the shared runtime. */
 	dispose(): Promise<void>;
@@ -217,6 +230,7 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 		return runtime;
 	};
 	return {
+		supportsModelPerformanceProbes: true,
 		async create(launch) {
 			const observeReadonly = prepareReadonlySessionEvidence(launch);
 			const pi = await loadPiCodingAgent();
@@ -264,11 +278,14 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 					? pi.resolveCliModel({ cliModel: launch.model, modelRuntime })
 					: undefined;
 				if (resolvedModel?.error) throw new Error(resolvedModel.error);
+				const sessionModel = resolvedModel?.model && launch.maxOutputTokens !== undefined
+					? { ...resolvedModel.model, maxTokens: Math.min(resolvedModel.model.maxTokens, launch.maxOutputTokens) }
+					: resolvedModel?.model;
 				const { session } = await pi.createAgentSession({
 					cwd: launch.cwd,
 					agentDir,
 					modelRuntime,
-					...(resolvedModel?.model ? { model: resolvedModel.model } : {}),
+					...(sessionModel ? { model: sessionModel } : {}),
 					...(resolvedModel?.thinkingLevel ? { thinkingLevel: resolvedModel.thinkingLevel } : {}),
 					...(launch.tools ? { tools: launch.tools } : {}),
 					...(launch.excludeTools?.length ? { excludeTools: launch.excludeTools } : {}),
@@ -295,6 +312,44 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 			try { evidence = observeReadonly?.observe(pi, modelRuntime, session); }
 			catch (error) { session.dispose(); throw error; }
 			let pending: Promise<void> | undefined;
+			let pendingModelSwitch: Promise<void> | undefined;
+			let responseCheckpoint: string | null | undefined;
+			const unsubscribeCheckpoint = session.subscribe((event) => {
+				if (event.type === "message_end" && (event.message.role === "user" || event.message.role === "toolResult")) {
+					// AgentSession notifies subscribers immediately before it persists message_end.
+					// Capture in the next microtask so even a provider request that stalls before
+					// assistant message_start can return to the newly persisted input.
+					queueMicrotask(() => { responseCheckpoint = session.sessionManager.getLeafId(); });
+				}
+				if (event.type === "message_start" && event.message.role === "assistant") {
+					responseCheckpoint = session.sessionManager.getLeafId();
+				}
+			});
+			const applyRuntimeModel = async (reference: string): Promise<void> => {
+				const resolved = pi.resolveCliModel({ cliModel: reference, modelRuntime });
+				if (resolved.error) throw new Error(resolved.error);
+				if (!resolved.model) throw new Error(`Unable to resolve model '${reference}'.`);
+				await session.setModel(resolved.model);
+				if (resolved.thinkingLevel !== undefined) {
+					session.setThinkingLevel(clampThinkingLevel(resolved.model, resolved.thinkingLevel));
+				}
+				const readonly = readonlyModels.get(child);
+				if (readonly) readonly.current = toModelInfo(resolved.model);
+			};
+			// Agent awaits its listeners in registration order. AgentSession dispatches
+			// turn_end to child subscribers first; this later listener then prevents the
+			// next provider request from racing the public async model mutation above.
+			const unsubscribeModelSwitchBarrier = typeof session.agent?.subscribe === "function"
+				? session.agent.subscribe(async (event) => {
+					if (event.type !== "turn_end" || !pendingModelSwitch) return;
+					const currentSwitch = pendingModelSwitch;
+					try {
+						await currentSwitch;
+					} finally {
+						if (pendingModelSwitch === currentSwitch) pendingModelSwitch = undefined;
+					}
+				})
+				: () => {};
 			// pi's own hosts emit `session_shutdown` before disposing a session so the
 			// extensions loaded into it (ambient extensions included) release their
 			// watchers, servers, and timers. Do the same, then dispose.
@@ -310,6 +365,8 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 					evidence?.invalidate();
 					launch.onExtensionError?.({ extensionPath: "<session>", event: "session_shutdown", error });
 				} finally {
+					unsubscribeCheckpoint();
+					unsubscribeModelSwitchBarrier();
 					session.dispose();
 					evidence?.finish(child);
 				}
@@ -324,6 +381,26 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 				steer: (text) => { evidence?.invalidate(); return session.steer(text); },
 				followUp: (text) => { evidence?.invalidate(); return session.followUp(text); },
 				abort: () => { evidence?.invalidate(); return session.abort(); },
+				async switchModelForNextResponse(reference) {
+					const previousSwitch = pendingModelSwitch;
+					pendingModelSwitch = previousSwitch
+						? previousSwitch.then(() => applyRuntimeModel(reference))
+						: applyRuntimeModel(reference);
+					await pendingModelSwitch;
+				},
+				async retryCurrentResponseWithModel(reference, canContinue) {
+					if (responseCheckpoint === undefined || responseCheckpoint === null) {
+						throw new Error("Cannot retry the response because its session checkpoint is unavailable.");
+					}
+					const checkpoint = responseCheckpoint;
+					const navigation = await session.navigateTree(checkpoint, { summarize: false });
+					if (navigation.cancelled) throw new Error("Response retry session navigation was cancelled.");
+					if (canContinue && !canContinue("before-model")) return;
+					await applyRuntimeModel(reference);
+					if (canContinue && !canContinue("before-generation")) return;
+					if (navigation.editorText !== undefined) await session.prompt(navigation.editorText);
+					else await session.agent.continue();
+				},
 				hasQueuedMessages: () => session.agent?.hasQueuedMessages?.() === true,
 				dispose: () => {
 					if (!pending) {
