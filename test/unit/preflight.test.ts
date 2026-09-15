@@ -226,6 +226,38 @@ Project prompt.
 		assert.notEqual(sameCandidatesFromDifferentClass.contract.launchContractDigest, result.contract.launchContractDigest);
 	});
 
+	it("lets an explicit launch model override the agent modelClass", async () => {
+		const cwd = path.join(tempDir, "repo-explicit-model-over-class");
+		fs.mkdirSync(cwd, { recursive: true });
+		writeJson(path.join(process.env.PI_CODING_AGENT_DIR!, "settings.json"), {
+			subagents: { modelPools: { smart: ["test/primary", "other/fallback"] } },
+		});
+		writeAgent(path.join(cwd, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Project worker
+modelClass: smart
+---
+Project prompt.
+`);
+
+		const result = await resolveSubagentLaunchContract({
+			agent: "worker",
+			cwd,
+			model: "test/exact",
+			availableModels: [
+				{ provider: "test", id: "primary", fullId: "test/primary" },
+				{ provider: "test", id: "exact", fullId: "test/exact" },
+				{ provider: "other", id: "fallback", fullId: "other/fallback" },
+			],
+		});
+
+		assert.equal(result.ok, true);
+		if (!result.ok) return;
+		assert.equal(result.contract.model, "test/exact");
+		assert.deepEqual(result.contract.modelCandidates, ["test/exact"]);
+		assert.equal(result.contract.requestedModelClass, undefined);
+	});
+
 	it("rejects a thinking override that collapses model-class candidates before launch", async () => {
 		const cwd = path.join(tempDir, "repo-model-class-thinking-collision");
 		fs.mkdirSync(cwd, { recursive: true });

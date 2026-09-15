@@ -109,9 +109,42 @@ Use lowercase kebab-case class names. Each pool is ordered; a project pool repla
 
 Per-run forms are `modelClass: "smart"` in structured calls/workflow children and `/run oracle[modelClass=smart] ...`. An explicit per-run or agent-override class must exist. An unmapped frontmatter class falls back to its concrete `model`/`fallbackModels`, then the normal defaults.
 
-The pool is resolved and frozen when the child launches. Status/results expose `modelRouting` with the class, source, pool digest, and candidates; retained resume uses that frozen candidate set even if settings later change.
+The pool is resolved and frozen when the child launches. Status/results expose `modelRouting` with the class, source, pool digest, and candidates; retained resume uses that frozen candidate set even if settings later change. Recent performance data may reorder that set for execution, but it never rewrites the frozen routing snapshot.
 
-Failover stays inside the selected class. Transient/provider-unavailable failures may try the next candidate; auth, billing, and quota failures cross only to a different provider. Context-window, policy, tool, control, and unknown task failures do not fail over. A candidate is attempted at most once because Pi core already owns request-level retries. No-tool/read-only failures restart on the next candidate; workspace edits continue in the retained session; external or unknown effects block automatic failover to avoid duplicate side effects.
+Failover stays inside the selected class. Each entry is an independent candidate: retryable transient, unavailable, authentication, authorization, billing, quota, usage-limit, and request-limit failures may try any remaining candidate, including another model under the same provider or aggregation gateway. Context-window, policy, tool, control, and unknown task failures do not fail over. A candidate is attempted at most once because Pi core already owns request-level retries. No-tool/read-only failures restart on the next candidate; workspace edits continue in the retained session; external or unknown effects block automatic failover to avoid duplicate side effects. Model-class failures do not create cross-task cooldowns; a later run evaluates the class afresh.
+
+### Performance-aware class selection
+
+Model-class launches also use fresh first-token and generation-throughput observations. Candidates with measurements are ranked by the predicted time for a 128-token response (`first-token latency + 128 / token-per-second`); candidates without data retain their declared relative order. Real task responses supersede synthetic probe samples. Measurements expire after five minutes by default and affect ordering only, never class membership or cross-run eligibility.
+
+On a cold cache, the declared first candidate starts immediately. Bounded tool-free requests probe unmeasured alternatives in the background, with at most two probes active across local Pi processes. Each probe stops after 15 seconds or about 64 estimated output tokens and consumes real provider quota. Probe results are shown only in human-facing UI/run details and never added to the parent agent's result.
+
+For a child launched through `modelClass`, pi-subagents estimates output at four characters per token and monitors text, thinking, and tool-call deltas. It excludes tool execution, coordination waits, and retry backoff:
+
+- A hard first-token stall or rolling throughput below the hard threshold aborts the incomplete response, discards its partial text/tool call, and retries from the same session checkpoint on the best untried candidate.
+- Throughput below the soft threshold finishes the current response. If that response invokes a tool, its tool work is retained and the best untried candidate is selected before the next model response.
+- A final response is never rerun for soft degradation, and the last candidate continues even when slow.
+
+Exact `model` launches and legacy explicit `model`/`fallbackModels` chains do not use performance probing or performance-driven switching.
+
+The optional settings below override the defaults; project settings win field by field over user settings:
+
+```json
+{
+  "subagents": {
+    "modelPerformance": {
+      "firstTokenTimeoutMs": 45000,
+      "hardTokensPerSecond": 2,
+      "softTokensPerSecond": 8,
+      "cacheTtlMs": 300000
+    }
+  }
+}
+```
+
+The hard rolling window is 20 seconds and the soft rolling window is 30 seconds. `hardTokensPerSecond` must be lower than `softTokensPerSecond`.
+
+The interactive main agent is advisory-only: pi-subagents never aborts or changes its model. When a response is slow, Pi displays a UI-only card. If the current provider/model maps (ignoring thinking level) to exactly one configured class, the card recommends another candidate from that class and may probe alternatives for future routing; otherwise it shows a generic warning. The card is not inserted into model context.
 
 ## Fast mode
 

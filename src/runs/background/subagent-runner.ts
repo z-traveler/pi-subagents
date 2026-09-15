@@ -132,6 +132,9 @@ import {
 import { findModelInfo, resolveEffectiveThinking, splitKnownThinkingSuffix } from "../../shared/model-info.ts";
 import { assertThinkingWithinCeiling } from "../../shared/thinking-ceiling.ts";
 import { resolveLaunchBinding } from "../../shared/launch-contract.ts";
+import { createModelPerformanceCacheKey, DEFAULT_MODEL_PERFORMANCE_CONFIG, ModelPerformanceStore, rankModelCandidates } from "../shared/model-performance.ts";
+import { createChildSessionModelPerformanceProbeExecutor } from "../shared/child-session-model-performance-probe.ts";
+import { warmModelPerformanceCache, type ModelPerformanceProbeResult } from "../shared/model-performance-probe.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 import { acceptanceFailureMessage, aggregateAcceptanceReport, buildSkippedAcceptanceLedger, captureStagedIndexBaseline, evaluateAcceptance, formatAcceptancePrompt, resolveAcceptanceReportMode, resolveEffectiveAcceptance, stripAcceptanceReport, typedVerifyOutput } from "../shared/acceptance.ts";
@@ -263,6 +266,8 @@ interface StepResult {
 	modelRouting?: import("../../shared/types.ts").ModelRoutingSnapshot;
 	thinking?: string;
 	requestedModel?: string;
+	attemptedModels?: string[];
+	modelAttempts?: ModelAttempt[];
 	/** True when the dispatch failed because the input exceeded the model's context window. */
 	contextOverflow?: boolean;
 	totalCost?: CostSummary;
@@ -424,6 +429,23 @@ function costSummaryFromUsage(usage: Usage | undefined): CostSummary | undefined
 	const costUsd = usage?.cost ?? 0;
 	return inputTokens > 0 || outputTokens > 0 || costUsd > 0
 		? { inputTokens, outputTokens, costUsd }
+		: undefined;
+}
+
+function usageFromAttempts(attempts: ModelAttempt[] | undefined): Usage | undefined {
+	if (!attempts || attempts.length === 0) return undefined;
+	const usage = emptyUsage();
+	for (const attempt of attempts) {
+		if (!attempt.usage) continue;
+		usage.input += attempt.usage.input;
+		usage.output += attempt.usage.output;
+		usage.cacheRead += attempt.usage.cacheRead;
+		usage.cacheWrite += attempt.usage.cacheWrite;
+		usage.cost += attempt.usage.cost;
+		usage.turns += attempt.usage.turns;
+	}
+	return usage.input !== 0 || usage.output !== 0 || usage.cacheRead !== 0 || usage.cacheWrite !== 0 || usage.cost !== 0 || usage.turns !== 0
+		? usage
 		: undefined;
 }
 
@@ -652,6 +674,24 @@ async function readGitFingerprint(cwd: string, signal: AbortSignal, onError: (er
 	}
 }
 
+interface ModelPerformanceProbeNotice {
+	phase: "started" | "result";
+	message: string;
+	candidate?: string;
+	result?: ModelPerformanceProbeResult;
+}
+
+function formatModelPerformanceProbeResult(result: ModelPerformanceProbeResult): string {
+	if (result.status === "sampled") {
+		return `[model performance probe] ${result.candidate} sampled: ${result.observation.ttftMs.toFixed(0)}ms TTFT, ${result.observation.estimatedTokensPerSecond.toFixed(1)} tok/s.`;
+	}
+	if (result.status === "failed") {
+		const error = result.error.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 240);
+		return `[model performance probe] ${result.candidate} failed${error ? `: ${error}` : "."}`;
+	}
+	return `[model performance probe] ${result.candidate} ${result.status}.`;
+}
+
 /** Context for running a single step */
 interface SingleStepContext {
 	previousOutput: string;
@@ -693,6 +733,8 @@ interface SingleStepContext {
 	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
 	runFanoutBudget?: RunFanoutBudgetDescriptor;
 	onAttemptStart?: (attempt: { model?: string; thinking?: string; contextLimit?: number }) => void;
+	onModelPerformanceProbe?: (notice: ModelPerformanceProbeNotice) => void;
+	registerBackgroundTask?: (task: Promise<void>) => void;
 	onChildEvent?: (event: ChildEvent) => void;
 	onExternalProcess?: (process: ExternalProcessStatus) => void;
 	prepareExternalActivity?: (cwd: string, signal: AbortSignal) => Promise<void>;
@@ -784,6 +826,8 @@ export async function runSingleStepInner(
 				sessionFile: imported.sessionFile,
 				intercomTarget: imported.intercomTarget,
 				model: imported.model,
+				attemptedModels: imported.attemptedModels,
+				modelAttempts: imported.modelAttempts,
 				requestedModel: imported.requestedModel,
 				contextOverflow: imported.contextOverflow,
 				totalCost: imported.totalCost,
@@ -935,6 +979,8 @@ export async function runSingleStepInner(
 			temporaryDirectories: adapterLaunch?.temporaryDirectories,
 			registerTimeout: ctx.registerTimeout,
 			registerStop: ctx.registerStop,
+			timeoutSignal: ctx.timeoutSignal,
+			stopSignal: ctx.stopSignal,
 			timeoutMessage: ctx.timeoutMessage,
 			stopMessage: ctx.stopMessage,
 			onProcess: ctx.onExternalProcess,
@@ -1068,11 +1114,25 @@ export async function runSingleStepInner(
 		alignForkedSessionCwd(step.sessionFile, effectiveCwd);
 	}
 
-	const candidates = step.modelCandidates !== undefined
+	const frozenCandidates = step.modelCandidates !== undefined
 		? step.modelCandidates.length > 0 ? step.modelCandidates : [undefined]
 		: step.model
 			? [step.model]
 			: [undefined];
+	const performanceConfig = step.modelPerformance ?? DEFAULT_MODEL_PERFORMANCE_CONFIG;
+	const performanceKey = step.modelRouting && step.modelCandidates && step.modelCandidates.length > 0
+		? createModelPerformanceCacheKey(step.modelRouting, step.modelRouting.candidates)
+		: undefined;
+	const performanceStore = performanceKey ? new ModelPerformanceStore() : undefined;
+	const initialPerformanceObservations = performanceKey && performanceStore
+		? performanceStore.read(performanceKey, performanceConfig.cacheTtlMs)
+		: [];
+	const candidates = performanceKey && performanceStore && step.modelCandidates
+		? rankModelCandidates(
+			step.modelCandidates,
+			initialPerformanceObservations,
+		)
+		: frozenCandidates;
 	let modelIndex = 0;
 	const attemptedModels: string[] = [];
 	const modelAttempts: ModelAttempt[] = [];
@@ -1081,12 +1141,37 @@ export async function runSingleStepInner(
 	let launchResolvedExtensions = step.launchResolvedExtensions;
 	let finalRequiredOutputMissing: boolean | undefined;
 	const eventsPath = path.join(path.dirname(ctx.outputFile), "events.jsonl");
+	const publishModelPerformanceProbeNotice = (notice: ModelPerformanceProbeNotice): void => {
+		try {
+			fs.appendFileSync(ctx.outputFile, `${notice.message}\n`, "utf-8");
+		} catch {
+			// Probe output is human-facing observability only.
+		}
+		ctx.orcaProgressTab?.append(`${notice.message}\n`);
+		appendDiagnosticJsonl(eventsPath, JSON.stringify(omitUndefinedProperties({
+			type: notice.phase === "started"
+				? "subagent.model-performance-probe.started"
+				: "subagent.model-performance-probe.result",
+			ts: Date.now(),
+			runId: ctx.id,
+			stepIndex: ctx.flatIndex,
+			agent: step.agent,
+			candidate: notice.candidate,
+			result: notice.result,
+		})), notice.phase === "started" ? "model-performance-probe-started" : "model-performance-probe-result");
+		try {
+			ctx.onModelPerformanceProbe?.(notice);
+		} catch {
+			// A stale human-facing status observer must not affect task execution.
+		}
+	};
 	let finalResult: RunChildSessionResult | undefined;
 	let finalOutputSnapshot: SingleOutputSnapshot | undefined;
 	let structuredAcceptanceReport: unknown;
 	let structuredAcceptanceReportError: string | undefined;
 	let toolBudget = step.toolBudget ? initialToolBudgetState(step.toolBudget) : undefined;
 	let toolBudgetBlocked = false;
+	let performanceProbeStarted = false;
 	let actualLaunchContractDigest = step.launchContractDigest;
 	const mutationSnapshot = step.machine ? { source: "tracked-files" as const, trackedOnly: true as const, cwd: step.cwd ?? ctx.cwd, dirtyFiles: [], fingerprints: {}, unavailable: "Local Git evidence is not authoritative for a pane-native remote run." } : snapshotTrackedMutations(step.cwd ?? ctx.cwd);
 	let finalMutationEvidence = collectTrackedMutationEvidence(mutationSnapshot, step.cwd ?? ctx.cwd);
@@ -1181,7 +1266,7 @@ export async function runSingleStepInner(
 				inheritSkills: step.inheritSkills,
 				task: step.launchBindingTask ?? task,
 				model: candidate,
-				modelCandidates: candidates as string[],
+				modelCandidates: frozenCandidates as string[],
 				...(step.modelRouting?.modelClass ? { modelClass: step.modelRouting.modelClass } : {}),
 				...(step.modelRouting?.poolDigest ? { modelPoolDigest: step.modelRouting.poolDigest } : {}),
 				fast: step.fast,
@@ -1207,7 +1292,47 @@ export async function runSingleStepInner(
 				return { agent: step.agent, output: message, error: message, exitCode: 1, context: step.context };
 			}
 		}
-		const run = await runChildSession(omitUndefinedProperties({
+		const attemptRecentTools: Array<{ tool: string; args: string; endMs: number }> = [];
+		const attemptStartedAt = Date.now();
+		const performanceCandidates = performanceKey && performanceStore && candidate
+			? candidates.filter((entry): entry is string => typeof entry === "string" && (entry === candidate || !attemptedModels.includes(entry)))
+			: undefined;
+		const startModelPerformanceProbes = (): void => {
+			if (performanceProbeStarted || !performanceKey || !performanceStore || !candidate
+				|| ctx.childSessions.supportsModelPerformanceProbes !== true) return;
+			performanceProbeStarted = true;
+			const freshCandidates = new Set(initialPerformanceObservations.map(({ candidate: observed }) => observed));
+			const probeCandidates = candidates.filter((entry): entry is string => typeof entry === "string"
+				&& entry !== candidate && !freshCandidates.has(entry));
+			if (probeCandidates.length === 0) return;
+			publishModelPerformanceProbeNotice({
+				phase: "started",
+				message: `[model performance probe] probing ${probeCandidates.length} unmeasured alternative${probeCandidates.length === 1 ? "" : "s"} in the background.`,
+			});
+			const probeTask = warmModelPerformanceCache({
+				key: performanceKey,
+				candidates: probeCandidates,
+				config: performanceConfig,
+				store: performanceStore,
+				execute: createChildSessionModelPerformanceProbeExecutor(ctx.childSessions, launch.session),
+				signal: combinedAbortSignal([ctx.timeoutSignal, ctx.stopSignal]),
+				onResult: (result) => publishModelPerformanceProbeNotice({
+					phase: "result",
+					candidate: result.candidate,
+					result,
+					message: formatModelPerformanceProbeResult(result),
+				}),
+			}).then(() => undefined, (probeError: unknown) => {
+				const message = probeError instanceof Error ? probeError.message : String(probeError);
+				publishModelPerformanceProbeNotice({
+					phase: "result",
+					message: `[model performance probe] background probe batch failed: ${message.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 240)}`,
+				});
+			});
+			ctx.registerBackgroundTask?.(probeTask);
+			void probeTask;
+		};
+		const childRun = runChildSession(omitUndefinedProperties({
 			factory: ctx.childSessions,
 			launch,
 			prompt: `Task: ${recoveryTask}`,
@@ -1243,7 +1368,22 @@ export async function runSingleStepInner(
 			modelVerificationRegistry: step.modelVerificationRegistry,
 			modelResponseAliases: step.modelResponseAliases,
 			mutationTools: step.mutationTools,
+			onPrimaryPromptStarted: startModelPerformanceProbes,
+			modelPerformance: performanceCandidates && performanceKey && performanceStore && candidate ? {
+				candidates: performanceCandidates,
+				currentCandidate: candidate,
+				config: performanceConfig,
+				cacheKey: performanceKey,
+				store: performanceStore,
+				verifyModel: expectedModelForVerification !== undefined,
+				onSwitch: (action) => ctx.onAttemptStart?.(omitUndefinedProperties({
+					model: action.to,
+					thinking: resolveEffectiveThinking(action.to, step.thinking),
+					contextLimit: findModelInfo(action.to, step.modelVerificationRegistry)?.contextWindow,
+				})),
+			} : undefined,
 		}));
+		const run = await childRun;
 		launched = true;
 		aggregateUsage.input += run.usage.input;
 		aggregateUsage.output += run.usage.output;
@@ -1338,6 +1478,8 @@ export async function runSingleStepInner(
 					: `${hiddenError.errorType} failed with exit code ${effectiveExitCode}`
 				: undefined);
 		const error = underlyingError ?? missingRequiredOutputError;
+		if (run.performanceAttempts) modelAttempts.push(...run.performanceAttempts);
+		const settledCandidate = run.performanceCurrentCandidate ?? candidate ?? run.model ?? step.model;
 		finalOutputSnapshot = outputSnapshot;
 		if (step.toolBudget) {
 			const toolMessages = run.messages.filter((message) => message.role === "toolResult");
@@ -1352,16 +1494,18 @@ export async function runSingleStepInner(
 			afterCompactionSettlement: run.afterCompactionSettlement === true,
 		} : undefined;
 		const fileMutationEffect = missingRequiredOutputAfterMutation ? { status: "observed" as const, attempted: true as const, evidence: mutationEvidence } : undefined;
-		finalResult = { ...run, exitCode: effectiveExitCode, model: candidate ?? run.model, error, structuredOutput, runtimeAcknowledgedExtensions, ...(step.agentContract ? { agentContract: step.agentContract } : {}), ...(fileMutationEffect || settlementDiagnostic ? { effects: { ...(fileMutationEffect ? { fileMutation: fileMutationEffect } : {}), ...(settlementDiagnostic ? { settlementDiagnostic } : {}) } } : {}) } as RunChildSessionResult;
+		finalResult = { ...run, exitCode: effectiveExitCode, model: settledCandidate, error, structuredOutput, runtimeAcknowledgedExtensions, ...(step.agentContract ? { agentContract: step.agentContract } : {}), ...(fileMutationEffect || settlementDiagnostic ? { effects: { ...(fileMutationEffect ? { fileMutation: fileMutationEffect } : {}), ...(settlementDiagnostic ? { settlementDiagnostic } : {}) } } : {}) } as RunChildSessionResult;
 		const attempt: ModelAttempt = omitUndefinedProperties({
-			model: candidate ?? run.model ?? step.model ?? "default",
+			model: settledCandidate ?? "default",
 			success: effectiveExitCode === 0 && !error,
 			exitCode: effectiveExitCode,
 			error,
-			usage: run.usage,
+			usage: run.performanceCurrentUsage ?? run.usage,
 		});
 		modelAttempts.push(attempt);
-		if (candidate) attemptedModels.push(candidate);
+		for (const attempted of run.performanceAttemptedModels ?? (candidate ? [candidate] : [])) {
+			if (!attemptedModels.includes(attempted)) attemptedModels.push(attempted);
+		}
 		if (run.stopped || run.timedOut || ctx.timeoutSignal?.aborted || ctx.stopSignal?.aborted || ctx.skipAcceptance?.()) break modelLoop;
 		if (attempt.success) break modelLoop;
 		const recovery = planAbortRecovery({
@@ -1388,7 +1532,7 @@ export async function runSingleStepInner(
 			finalResult.abortRecoveryDiagnostic = recovery.diagnostic;
 		}
 		const retryableModelFailure = isRetryableModelFailureAttempt({ error, messages: run.messages, toolCount: run.toolCount });
-		if (retryableModelFailure) recordRetryableModelFailure(candidate ?? run.model ?? step.model, error);
+		if (retryableModelFailure && !step.modelRouting) recordRetryableModelFailure(settledCandidate, error);
 		if (isContextOverflow(error)) {
 			contextOverflow = true;
 			break modelLoop;
@@ -1409,20 +1553,24 @@ export async function runSingleStepInner(
 			});
 			attempt.failureCategory = failureCategory;
 			attempt.effects = effects;
-			const selection = selectModelFailover({ category: failureCategory, currentModel: candidate, candidates: candidates as string[], currentIndex: modelIndex, effects });
-			attempt.failureDomain = selection.failureDomain;
+			const selection = selectModelFailover({ category: failureCategory, currentModel: settledCandidate, candidates: candidates as string[], currentIndex: modelIndex, effects });
 			attempt.skippedModels = selection.skippedModels.length > 0 ? selection.skippedModels : undefined;
 			if (!selection.decision.retry) {
 				attempt.retryBlockedReason = selection.decision.reason;
 				attempt.failoverReason = selection.decision.reason;
 				break modelLoop;
 			}
-			const nextIndex = selection.nextIndex!;
+			let nextIndex = selection.nextIndex!;
+			while (nextIndex < candidates.length && candidates[nextIndex] && attemptedModels.includes(candidates[nextIndex]!)) nextIndex++;
+			if (nextIndex >= candidates.length) {
+				attempt.retryBlockedReason = "All same-class model candidates were already attempted in this run.";
+				attempt.failoverReason = attempt.retryBlockedReason;
+				break modelLoop;
+			}
 			const nextModel = candidates[nextIndex];
 			attempt.retryMode = selection.decision.mode;
 			attempt.nextModel = nextModel;
 			attempt.failoverReason = `${failureCategory}:${selection.decision.mode}`;
-			attemptNotes.push(formatModelAttemptNote(attempt, nextModel));
 			recoveryTask = selection.decision.mode === "resume"
 				? `${task}\n\n[Model failover continuation]\nA previous same-class model attempt changed the workspace before failing. Inspect the existing session and workspace state, continue from that state, and do not repeat completed external actions.`
 				: task;
@@ -1595,9 +1743,11 @@ export async function runSingleStepInner(
 		intercomTarget: ctx.childIntercomTarget,
 		model: finalResult?.model,
 		nativeMachine: finalResult?.nativeMachine,
-		modelRouting: step.modelRouting ? { ...step.modelRouting, candidates: [...candidates].filter((candidate): candidate is string => Boolean(candidate)) } : undefined,
+		modelRouting: step.modelRouting ? { ...step.modelRouting, candidates: [...step.modelRouting.candidates] } : undefined,
 		thinking: resolveEffectiveThinking(finalResult?.model, step.thinking),
 		requestedModel: step.requestedModel,
+		attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
+		modelAttempts,
 		contextOverflow: contextOverflow || undefined,
 		totalCost: costSummaryFromUsage(usage),
 		usage,
@@ -1934,6 +2084,17 @@ export async function runSubagent(
 	let previousOutput = "";
 	const outputs: ChainOutputMap = {};
 	const results: StepResult[] = [];
+	const backgroundTasks = new Set<Promise<void>>();
+	const registerBackgroundTask = (task: Promise<void>): void => {
+		backgroundTasks.add(task);
+		void task.then(
+			() => backgroundTasks.delete(task),
+			() => backgroundTasks.delete(task),
+		);
+	};
+	const drainBackgroundTasks = async (): Promise<void> => {
+		while (backgroundTasks.size > 0) await Promise.allSettled([...backgroundTasks]);
+	};
 	const overallStartTime = Date.now();
 	const shareEnabled = config.share === true;
 	const asyncDir = config.asyncDir;
@@ -2008,6 +2169,7 @@ export async function runSubagent(
 					...(task.contextLimit !== undefined ? { contextLimit: task.contextLimit } : {}),
 					thinking: task.thinking,
 					requestedModel: task.requestedModel,
+					attemptedModels: task.modelCandidates && task.modelCandidates.length > 0 ? task.modelCandidates : task.model ? [task.model] : undefined,
 					recentTools: [],
 					recentOutput: [],
 				}));
@@ -2064,6 +2226,7 @@ export async function runSubagent(
 				...(step.contextLimit !== undefined ? { contextLimit: step.contextLimit } : {}),
 				thinking: step.thinking,
 				requestedModel: step.requestedModel,
+				attemptedModels: step.modelCandidates && step.modelCandidates.length > 0 ? step.modelCandidates : step.model ? [step.model] : undefined,
 				recentTools: [],
 				recentOutput: [],
 			}));
@@ -2292,6 +2455,9 @@ export async function runSubagent(
 				modelRouting: step.modelRouting,
 				thinking: step.thinking,
 				requestedModel: step.requestedModel,
+				attemptedModels: step.attemptedModels,
+				modelAttempts: step.modelAttempts,
+				usage: usageFromAttempts(step.modelAttempts),
 				contextOverflow: step.contextOverflow,
 			})),
 			exitCode: state === "complete" || state === "paused" ? 0 : 1,
@@ -3029,6 +3195,13 @@ export async function runSubagent(
 		statusPayload.lastUpdate = now;
 		writeStatusPayload();
 	};
+	const updateStepModelPerformanceProbe = (flatIndex: number, notice: ModelPerformanceProbeNotice): void => {
+		const step = statusPayload.steps[flatIndex];
+		if (!step) return;
+		appendRecentStepOutput(step, [notice.message]);
+		statusPayload.lastUpdate = Date.now();
+		writeStatusPayload(false);
+	};
 	const updateStepFromChildEvent = (flatIndex: number, event: ChildEvent): void => {
 		const step = statusPayload.steps[flatIndex];
 		if (!step) return;
@@ -3684,6 +3857,7 @@ export async function runSubagent(
 					...(task.thinking ? { thinking: task.thinking } : {}),
 					...(task.thinkingCeiling ? { thinkingCeiling: task.thinkingCeiling } : {}),
 					...(task.requestedModel ? { requestedModel: task.requestedModel } : {}),
+					...(task.modelCandidates && task.modelCandidates.length > 0 ? { attemptedModels: task.modelCandidates } : task.model ? { attemptedModels: [task.model] } : {}),
 					recentTools: [],
 					recentOutput: [],
 				});
@@ -3808,6 +3982,8 @@ export async function runSubagent(
 					stopMessage,
 					toolTimeoutMs: task.toolTimeoutMs ?? config.toolTimeoutMs,
 					onAttemptStart: (attempt) => updateStepModel(fi, attempt.model, attempt.thinking, attempt.contextLimit),
+					onModelPerformanceProbe: (notice) => updateStepModelPerformanceProbe(fi, notice),
+					registerBackgroundTask,
 					onChildEvent: (event) => updateStepFromChildEvent(fi, event),
 					onExternalProcess: (process) => updateExternalProcess(fi, process),
 					prepareExternalActivity: (externalCwd, signal) => prepareExternalActivity(fi, externalCwd, signal),
@@ -3905,6 +4081,8 @@ export async function runSubagent(
 					modelRouting: pr.modelRouting,
 					thinking: pr.thinking,
 					requestedModel: pr.requestedModel,
+					attemptedModels: pr.attemptedModels,
+					modelAttempts: pr.modelAttempts,
 					contextOverflow: pr.contextOverflow,
 					totalCost: pr.totalCost,
 					usage: pr.usage,
@@ -4221,6 +4399,8 @@ export async function runSubagent(
 							stopMessage,
 							toolTimeoutMs: taskForRun.toolTimeoutMs ?? config.toolTimeoutMs,
 							onAttemptStart: (attempt) => updateStepModel(fi, attempt.model, attempt.thinking, attempt.contextLimit),
+							onModelPerformanceProbe: (notice) => updateStepModelPerformanceProbe(fi, notice),
+							registerBackgroundTask,
 							onChildEvent: (event) => updateStepFromChildEvent(fi, event),
 							onExternalProcess: (process) => updateExternalProcess(fi, process),
 							prepareExternalActivity: (externalCwd, signal) => prepareExternalActivity(fi, externalCwd, signal),
@@ -4351,6 +4531,8 @@ export async function runSubagent(
 						modelRouting: pr.modelRouting,
 						thinking: pr.thinking,
 						requestedModel: pr.requestedModel,
+						attemptedModels: pr.attemptedModels,
+						modelAttempts: pr.modelAttempts,
 						contextOverflow: pr.contextOverflow,
 						totalCost: pr.totalCost,
 						usage: pr.usage,
@@ -4582,6 +4764,7 @@ export async function runSubagent(
 			const executionStep = singleWorktreeSetup
 				? bindWorktreeCwd({ ...seqStep, cwd: singleCwd }, singleCwd)
 				: seqStep;
+			const stepStatusIndex = flatIndex;
 			let singleResult: Awaited<ReturnType<typeof runSingleStepWithTimeout>>;
 			try {
 				singleResult = await runSingleStepWithTimeout(executionStep, compactOptional<SingleStepContext>({
@@ -4610,6 +4793,8 @@ export async function runSubagent(
 				stopMessage,
 				toolTimeoutMs: seqStep.toolTimeoutMs ?? config.toolTimeoutMs,
 				onAttemptStart: (attempt) => updateStepModel(flatIndex, attempt.model, attempt.thinking, attempt.contextLimit),
+				onModelPerformanceProbe: (notice) => updateStepModelPerformanceProbe(stepStatusIndex, notice),
+				registerBackgroundTask,
 				onChildEvent: (event) => updateStepFromChildEvent(flatIndex, event),
 				onExternalProcess: (process) => updateExternalProcess(flatIndex, process),
 				prepareExternalActivity: (externalCwd, signal) => prepareExternalActivity(flatIndex, externalCwd, signal),
@@ -4649,6 +4834,8 @@ export async function runSubagent(
 				modelRouting: singleResult.modelRouting,
 				thinking: singleResult.thinking,
 				requestedModel: singleResult.requestedModel,
+				attemptedModels: singleResult.attemptedModels,
+				modelAttempts: singleResult.modelAttempts,
 				contextOverflow: singleResult.contextOverflow,
 				totalCost: singleResult.totalCost,
 				usage: singleResult.usage,
@@ -5044,6 +5231,8 @@ export async function runSubagent(
 				modelRouting: r.modelRouting,
 				thinking: r.thinking,
 				requestedModel: r.requestedModel,
+				attemptedModels: r.attemptedModels,
+				modelAttempts: r.modelAttempts,
 				contextOverflow: r.contextOverflow,
 				totalCost: r.totalCost,
 				usage: r.usage,
@@ -5104,8 +5293,14 @@ export async function runSubagent(
 			...(taskIndex !== undefined && { taskIndex }),
 			...(totalTasks !== undefined && { totalTasks }),
 		}, (filePath, payload) => { writeAsyncResultFile(filePath, payload as Record<string, unknown>); });
-		// Only capacity deferral releases settled sessions before terminal publication.
-		if (!finalResultCommitted) await Promise.all([publication, disposeChildSessions()]);
+		// Publish without waiting for probes, but keep their shared child factory
+		// alive until their human-facing observations have drained.
+		if (!finalResultCommitted) {
+			if (backgroundTasks.size > 0) await publication;
+			else await Promise.all([publication, disposeChildSessions()]);
+		}
+		finalResultPublication = undefined;
+		await drainBackgroundTasks();
 	} catch (err) {
 		const message = `Failed to write result file ${resultPath}: ${err instanceof Error ? err.message : String(err)}`;
 		console.error(message, err);
@@ -5151,6 +5346,8 @@ export async function runSubagent(
 	}), (filePath, content) => runPersistence.write(filePath, { content }, (_path, payload) => {
 		fs.writeFileSync(_path, (payload as { content: string }).content, "utf-8");
 	}));
+	// A failed result publication can bypass the normal probe drain above.
+	await drainBackgroundTasks();
 	// Preserve normal-success disposal ordering, then drain remaining persistence retries.
 	await disposeChildSessions();
 	while (runPersistence.pendingCount() + indexPersistence.pendingCount() > 0) {

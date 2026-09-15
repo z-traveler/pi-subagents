@@ -12,10 +12,11 @@ import * as path from "node:path";
 import type { MockPi } from "../support/helpers.ts";
 import { createMockPi, createTempDir, events, makeAgent, makeAgentConfigs, removeTempDir } from "../support/helpers.ts";
 import { runSync } from "../../src/runs/foreground/execution.ts";
-import { childSessionFactory, createDefaultChildSessionFactory, disposeChildSessions, type ChildSessionFactory, type ChildSessionLaunch, type PiCodingAgentModule } from "../../src/runs/shared/child-session.ts";
+import { childSessionFactory, createDefaultChildSessionFactory, disposeChildSessions, type ChildSession, type ChildSessionFactory, type ChildSessionLaunch, type PiCodingAgentModule } from "../../src/runs/shared/child-session.ts";
 import { createNestedRoute } from "../../src/runs/shared/nested-events.ts";
 import { createStructuredOutputRuntime } from "../../src/runs/shared/structured-output.ts";
 import { rewriteSubagentPrompt } from "../../src/runs/shared/subagent-prompt-runtime.ts";
+import { createModelPerformanceCacheKey, ModelPerformanceStore } from "../../src/runs/shared/model-performance.ts";
 import type { ForegroundChildSessionControls, SingleResult } from "../../src/shared/types.ts";
 
 async function waitFor(read: () => boolean, timeoutMs = 5_000): Promise<void> {
@@ -177,6 +178,303 @@ describe("in-process foreground child", () => {
 		assert.match(result.error ?? "", /timed out after 60ms/);
 		assert.equal(mockPi.sessions[0]?.aborted, true);
 		assert.equal(mockPi.sessions[0]?.disposed, true);
+	});
+
+	it("retries an incomplete hard-stalled model-class response in the same child session", { timeout: 2_000 }, async () => {
+		const switches: string[] = [];
+		let creations = 0;
+		const factory: ChildSessionFactory = {
+			async create(launch) {
+				creations += 1;
+				let listener: ((event: Record<string, unknown>) => void) | undefined;
+				let activeModel = launch.model;
+				let releaseInitial: (() => void) | undefined;
+				let initialPending = false;
+				const messages: Array<Record<string, unknown>> = [];
+				const emit = (event: Record<string, unknown>) => listener?.(event);
+				const session: ChildSession = {
+					subscribe(next) { listener = next; return () => { listener = undefined; }; },
+					async prompt() {
+						initialPending = true;
+						emit({ type: "agent_start" });
+						emit({ type: "turn_start" });
+						await new Promise<void>((resolve) => { releaseInitial = resolve; });
+					},
+					async steer() {},
+					async followUp() {},
+					async abort() {
+						if (!initialPending) return;
+						initialPending = false;
+						const aborted = {
+							role: "assistant",
+							content: [
+								{ type: "text", text: "discard this incomplete text" },
+								{ type: "toolCall", id: "unfinished", name: "read", arguments: { path: "unfinished" } },
+							],
+							model: activeModel,
+							stopReason: "aborted", errorMessage: "aborted",
+							usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+						};
+						messages.push(aborted);
+						emit({ type: "message_end", message: aborted });
+						emit({ type: "turn_end", message: aborted, toolResults: [] });
+						emit({ type: "agent_end", messages: [aborted] });
+						emit({ type: "agent_settled" });
+						releaseInitial?.();
+					},
+					async retryCurrentResponseWithModel(model, canContinue) {
+						assert.equal(canContinue?.(), true);
+						switches.push(model);
+						activeModel = model;
+						emit({ type: "agent_start" });
+						emit({ type: "turn_start" });
+						const completed = {
+							role: "assistant", content: [{ type: "text", text: "completed on fast model" }], model,
+							stopReason: "stop",
+							usage: { input: 2, output: 4, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+						};
+						messages.push(completed);
+						emit({ type: "message_end", message: completed });
+						emit({ type: "turn_end", message: completed, toolResults: [] });
+						emit({ type: "agent_end", messages: [completed] });
+						emit({ type: "agent_settled" });
+					},
+					async dispose() {},
+					get messages() { return messages as ChildSession["messages"]; },
+					sessionFile: undefined,
+					sessionId: "performance-switch",
+					get modelId() { return activeModel; },
+				};
+				return session;
+			},
+			async dispose() {},
+		};
+		const candidates = ["gateway/slow", "gateway/fast"];
+
+		const keepAlive = setInterval(() => {}, 100);
+		const result = await runSync(tempDir, makeAgentConfigs(["echo"]), "echo", "Task", {
+			runId: "hard-performance-switch",
+			acceptance: false,
+			modelCandidates: candidates,
+			modelRouting: { modelClass: "smart", source: "per-run", poolDigest: "hard-performance", candidates },
+			modelPerformance: { firstTokenTimeoutMs: 20, hardTokensPerSecond: 2, softTokensPerSecond: 8, cacheTtlMs: 300_000 },
+			timeoutMs: 500,
+			childSessionFactory: factory,
+		});
+		clearInterval(keepAlive);
+
+		assert.equal(result.exitCode, 0, result.error);
+		assert.equal(result.timedOut, undefined);
+		assert.equal(result.finalOutput, "completed on fast model");
+		assert.equal(result.model, "gateway/fast");
+		assert.deepEqual(result.attemptedModels, candidates);
+		assert.equal(result.modelAttempts?.[0]?.failoverReason, "performance:hard");
+		assert.equal(result.messages?.some((message) => JSON.stringify(message).includes("discard this incomplete text")), false);
+		assert.doesNotMatch(result.finalOutput ?? "", /discard this incomplete text|unfinished/);
+		assert.match(result.modelAttempts?.[0]?.error ?? "", /incomplete response was discarded/i);
+		assert.deepEqual(switches, ["gateway/fast"]);
+		assert.equal(creations, 1);
+	});
+
+	it("retains a tolerably slow tool-call response and switches before the next response", async () => {
+		const originalNow = Date.now;
+		let now = 1_000;
+		Date.now = () => now;
+		const switches: string[] = [];
+		const candidates = ["gateway/slow", "gateway/fast"];
+		const factory: ChildSessionFactory = {
+			async create(launch) {
+				let listener: ((event: Record<string, unknown>) => void) | undefined;
+				let activeModel = launch.model;
+				const messages: Array<Record<string, unknown>> = [];
+				const emit = (event: Record<string, unknown>) => listener?.(event);
+				return {
+					subscribe(next) { listener = next; return () => { listener = undefined; }; },
+					async prompt() {
+						emit({ type: "agent_start" });
+						emit({ type: "turn_start" });
+						for (let second = 1; second <= 31; second++) {
+							now = second * 1_000;
+							emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "x".repeat(20) } });
+						}
+						const toolCall = {
+							role: "assistant",
+							content: [{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "README.md" } }],
+							model: activeModel,
+							stopReason: "toolUse",
+							usage: { input: 2, output: 155, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+						};
+						messages.push(toolCall);
+						emit({ type: "message_end", message: toolCall });
+						emit({ type: "tool_execution_start", toolCallId: "read-1", toolName: "read", args: { path: "README.md" } });
+						assert.deepEqual(switches, [], "soft degradation must wait until the current turn finishes");
+						const toolResult = { role: "toolResult", toolCallId: "read-1", toolName: "read", content: [{ type: "text", text: "retained tool result" }] };
+						messages.push(toolResult);
+						emit({ type: "tool_result_end", toolCallId: "read-1", toolName: "read", message: toolResult });
+						emit({ type: "tool_execution_end", toolCallId: "read-1", toolName: "read" });
+						emit({ type: "turn_end", message: toolCall, toolResults: [toolResult] });
+						now = 32_000;
+						emit({ type: "turn_start" });
+						emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "completed quickly" } });
+						now = 33_000;
+						const completed = {
+							role: "assistant", content: [{ type: "text", text: "completed after retained tool result" }], model: activeModel,
+							stopReason: "stop",
+							usage: { input: 3, output: 8, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+						};
+						messages.push(completed);
+						emit({ type: "message_end", message: completed });
+						emit({ type: "turn_end", message: completed, toolResults: [] });
+						emit({ type: "agent_end", messages: [toolCall, toolResult, completed] });
+						emit({ type: "agent_settled" });
+					},
+					async switchModelForNextResponse(model: string) { switches.push(model); activeModel = model; },
+					async retryCurrentResponseWithModel() { throw new Error("hard retry was not expected"); },
+					async steer() {},
+					async followUp() {},
+					async abort() {},
+					async dispose() {},
+					get messages() { return messages as ChildSession["messages"]; },
+					sessionFile: undefined,
+					sessionId: "soft-performance-switch",
+					get modelId() { return activeModel; },
+				} satisfies ChildSession;
+			},
+			async dispose() {},
+		};
+
+		try {
+			const result = await runSync(tempDir, makeAgentConfigs(["echo"]), "echo", "Task", {
+				runId: "soft-performance-switch",
+				acceptance: false,
+				modelCandidates: candidates,
+				modelRouting: { modelClass: "smart", source: "per-run", poolDigest: "soft-performance", candidates },
+				modelPerformance: { firstTokenTimeoutMs: 45_000, hardTokensPerSecond: 2, softTokensPerSecond: 8, cacheTtlMs: 300_000 },
+				childSessionFactory: factory,
+			});
+			assert.equal(result.exitCode, 0, result.error);
+			assert.equal(result.finalOutput, "completed after retained tool result");
+			assert.equal(result.model, "gateway/fast");
+			assert.deepEqual(result.attemptedModels, candidates);
+			assert.equal(result.modelAttempts?.[0]?.failoverReason, "performance:soft");
+			assert.deepEqual(switches, ["gateway/fast"]);
+			assert.equal(result.progressSummary?.toolCount, 1);
+		} finally {
+			Date.now = originalNow;
+		}
+	});
+
+	it("starts the declared model before cold background probes and uses their cache on the next task", { timeout: 2_000 }, async () => {
+		const candidates = ["gateway/declared", "gateway/probed"];
+		const routing = { modelClass: "smart", source: "per-run" as const, poolDigest: `foreground-probe-${Date.now()}`, candidates };
+		const performanceConfig = { firstTokenTimeoutMs: 45_000, hardTokensPerSecond: 2, softTokensPerSecond: 8, cacheTtlMs: 300_000 };
+		const cacheKey = createModelPerformanceCacheKey(routing, candidates);
+		const store = new ModelPerformanceStore();
+		const launches: ChildSessionLaunch[] = [];
+		const order: string[] = [];
+		let firstProbeRelease: (() => void) | undefined;
+		let probeCount = 0;
+		const probeNotices: string[] = [];
+		const factory: ChildSessionFactory = {
+			supportsModelPerformanceProbes: true,
+			async create(launch) {
+				launches.push(launch);
+				const probe = launch.maxOutputTokens !== undefined;
+				if (probe) order.push(`create probe ${launch.model}`);
+				let listener: ((event: Record<string, unknown>) => void) | undefined;
+				const messages: Array<Record<string, unknown>> = [];
+				let releasePrompt: (() => void) | undefined;
+				const emit = (event: Record<string, unknown>) => listener?.(event);
+				return {
+					subscribe(next) { listener = next; return () => { listener = undefined; }; },
+					async prompt() {
+						if (probe) {
+							probeCount++;
+							if (probeCount > 1) throw new Error("later probe failure");
+							order.push(`prompt probe ${launch.model}`);
+							await new Promise<void>((resolve) => {
+								releasePrompt = resolve;
+								firstProbeRelease = () => {
+									emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "x".repeat(128) } });
+									resolve();
+								};
+							});
+							return;
+						}
+						order.push(`prompt primary ${launch.model}`);
+						const completed = {
+							role: "assistant",
+							content: [{ type: "text", text: `completed by ${launch.model}` }],
+							model: launch.model,
+							stopReason: "stop",
+							usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+						};
+						messages.push(completed);
+						emit({ type: "agent_start" });
+						emit({ type: "turn_start" });
+						emit({ type: "message_end", message: completed });
+						emit({ type: "turn_end", message: completed, toolResults: [] });
+						emit({ type: "agent_end", messages: [completed] });
+						emit({ type: "agent_settled" });
+					},
+					async steer() {},
+					async followUp() {},
+					async abort() { releasePrompt?.(); },
+					async dispose() {},
+					get messages() { return messages as ChildSession["messages"]; },
+					sessionFile: undefined,
+					sessionId: `probe-test-${launches.length}`,
+					modelId: launch.model,
+				} satisfies ChildSession;
+			},
+			async dispose() {},
+		};
+
+		const first = await runSync(tempDir, makeAgentConfigs(["echo"]), "echo", "Task", {
+			runId: "foreground-cold-probe-first",
+			acceptance: false,
+			modelCandidates: candidates,
+			modelRouting: routing,
+			modelPerformance: performanceConfig,
+			onModelPerformanceProbe: (message) => probeNotices.push(message),
+			childSessionFactory: factory,
+		});
+		assert.equal(first.exitCode, 0, first.error);
+		assert.equal(first.model, candidates[0]);
+		assert.equal(first.finalOutput, `completed by ${candidates[0]}`);
+		await waitFor(() => firstProbeRelease !== undefined);
+		assert.equal(order[0], `prompt primary ${candidates[0]}`);
+		assert.match(first.progress?.recentOutput.join("\n") ?? "", /benchmarking gateway\/probed in the background/);
+		assert.doesNotMatch(first.finalOutput ?? "", /model probe|benchmarking/);
+
+		const probeLaunch = launches.find((launch) => launch.maxOutputTokens !== undefined);
+		assert.ok(probeLaunch);
+		assert.deepEqual(probeLaunch.storage, { kind: "memory" });
+		assert.equal(probeLaunch.model, candidates[1]);
+		assert.equal(probeLaunch.maxOutputTokens, 64);
+		assert.deepEqual(probeLaunch.tools, []);
+		assert.deepEqual(probeLaunch.extensionPaths, []);
+		assert.deepEqual(probeLaunch.hooks, []);
+		assert.equal(probeLaunch.ambientExtensions, false);
+		assert.equal(probeLaunch.noSkills, true);
+		assert.equal(probeLaunch.noContextFiles, true);
+
+		firstProbeRelease!();
+		await waitFor(() => store.read(cacheKey, performanceConfig.cacheTtlMs).some(({ candidate }) => candidate === candidates[1]));
+		assert.match(first.progress?.recentOutput.join("\n") ?? "", /gateway\/probed: .*token\/s/);
+		assert.ok(probeNotices.some((message) => /gateway\/probed: .*token\/s/.test(message)), "late probe results must use the human-only notification channel");
+
+		const second = await runSync(tempDir, makeAgentConfigs(["echo"]), "echo", "Task", {
+			runId: "foreground-cold-probe-second",
+			acceptance: false,
+			modelCandidates: candidates,
+			modelRouting: routing,
+			modelPerformance: performanceConfig,
+			childSessionFactory: factory,
+		});
+		assert.equal(second.exitCode, 0, second.error);
+		assert.equal(second.model, candidates[1]);
+		assert.equal(second.finalOutput, `completed by ${candidates[1]}`);
 	});
 
 	it("disposes the child session after a normal completion", async () => {
