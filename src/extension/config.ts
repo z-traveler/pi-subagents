@@ -10,6 +10,7 @@ import { validatePermissionConfig } from "../runs/shared/permissions.ts";
 import { MAX_ABANDONED_SLOT_RELEASE_AFTER_MS, MIN_ABANDONED_SLOT_RELEASE_AFTER_MS } from "../runs/background/active-async-capacity.ts";
 import { normalizeWorktreeBranchPrefix } from "../runs/shared/worktree.ts";
 import { validateModelResponseAliases } from "../shared/model-response-aliases.ts";
+import { DEFAULT_MODEL_EXCLUSION_TTL_MS, MAX_MODEL_EXCLUSION_TTL_MS, setDefaultTTL } from "../runs/shared/model-exclusions.ts";
 
 const ARTIFACT_DIR_PREFERENCES = new Set<ArtifactDirPreference>(["project", "session", "temp"]);
 const FLEET_KEYBINDING_ACTION_SET = new Set<string>(FLEET_KEYBINDING_ACTIONS);
@@ -96,6 +97,27 @@ function validateCapacityConfig(value: unknown): void {
 	}
 }
 
+/** Validate the user-controlled TTL policy before it reaches the exclusion store. */
+// TEST:test/unit/pi-coding-agent-dir.test.ts[loads and applies model exclusion TTL config]
+function validateModelExclusionsConfig(value: unknown): void {
+	if (value === undefined) return;
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("config.modelExclusions must be a JSON object");
+	const defaultTtlMs = (value as Record<string, unknown>).defaultTtlMs;
+	if (defaultTtlMs !== undefined && (typeof defaultTtlMs !== "number" || !Number.isFinite(defaultTtlMs) || defaultTtlMs <= 0 || defaultTtlMs > MAX_MODEL_EXCLUSION_TTL_MS)) {
+		throw new Error(`config.modelExclusions.defaultTtlMs must be a finite positive number no greater than ${MAX_MODEL_EXCLUSION_TTL_MS}`);
+	}
+}
+
+function validateFastModeConfig(value: unknown): void {
+	if (value === undefined) return;
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("config.fastMode must be a JSON object");
+	const models = (value as Record<string, unknown>).models;
+	if (models === undefined) return;
+	if (!Array.isArray(models) || models.some((model) => typeof model !== "string" || !model.trim() || model !== model.trim())) {
+		throw new Error("config.fastMode.models must be an array of exact non-empty model ID strings");
+	}
+}
+
 function validateOrcaProgressTabsConfig(value: unknown): void {
 	if (value === undefined) return;
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("config.orcaProgressTabs must be a JSON object");
@@ -172,7 +194,8 @@ function validateConfig(config: Record<string, unknown>): void {
 	validateFleetKeybindingsConfig(config.fleetKeybindings);
 	validateArtifactConfig(config.artifactConfig);
 	validateCapacityConfig(config.capacity);
-	if (config.modelExclusions !== undefined) throw new Error("config.modelExclusions was removed; model failures are no longer persisted or used for automatic switching");
+	validateModelExclusionsConfig(config.modelExclusions);
+	validateFastModeConfig(config.fastMode);
 	validateModelResponseAliases(config.modelResponseAliases);
 	validateMainWindowRendererConfig(config.mainWindowRenderer);
 	validateOrcaProgressTabsConfig(config.orcaProgressTabs);
@@ -205,6 +228,28 @@ export function updateConfig(updater: (config: ExtensionConfig) => ExtensionConf
 	return next;
 }
 
+/**
+ * Resolve the default TTL that the process-wide exclusion store should use.
+ *
+ * @param config Extension configuration after validation.
+ * @returns The configured TTL in milliseconds, or the built-in 24-hour default.
+ */
+// TEST:test/unit/pi-coding-agent-dir.test.ts[loads and applies model exclusion TTL config]
+export function resolveModelExclusionTTL(config: Pick<ExtensionConfig, "modelExclusions">): number {
+	return config.modelExclusions?.defaultTtlMs ?? DEFAULT_MODEL_EXCLUSION_TTL_MS;
+}
+
+/**
+ * Apply the configured exclusion policy to the process-wide model store.
+ *
+ * @param config Extension configuration after validation.
+ * @returns Nothing.
+ */
+// TEST:test/unit/pi-coding-agent-dir.test.ts[loads and applies model exclusion TTL config]
+export function applyModelExclusionsConfig(config: Pick<ExtensionConfig, "modelExclusions">): void {
+	setDefaultTTL(resolveModelExclusionTTL(config), { shortenExisting: config.modelExclusions?.defaultTtlMs !== undefined });
+}
+
 export function resolveAsyncByDefault(config: Pick<ExtensionConfig, "asyncByDefault">): boolean {
 	return config.asyncByDefault !== false;
 }
@@ -220,7 +265,7 @@ export function loadConfig(): ExtensionConfig {
 		try {
 			const raw = JSON.parse(fs.readFileSync(configPath, "utf-8")) as unknown;
 			if (raw && typeof raw === "object" && !Array.isArray(raw)
-				&& (Object.hasOwn(raw, "worktreeProvider") || Object.hasOwn(raw, "worktreeBranchPrefix") || Object.hasOwn(raw, "modelResponseAliases") || Object.hasOwn(raw, "modelExclusions") || Object.hasOwn(raw, "checkpointBeforeDeadlineMs"))) throw error;
+				&& (Object.hasOwn(raw, "worktreeProvider") || Object.hasOwn(raw, "worktreeBranchPrefix") || Object.hasOwn(raw, "fastMode") || Object.hasOwn(raw, "modelResponseAliases") || Object.hasOwn(raw, "modelExclusions") || Object.hasOwn(raw, "checkpointBeforeDeadlineMs"))) throw error;
 		} catch (readError) {
 			if (readError === error) throw error;
 		}

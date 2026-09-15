@@ -2439,6 +2439,8 @@ export interface RunSyncOptions {
 	parentProviderRegistry?: import("../runs/shared/child-session.ts").ParentProviderRegistry;
 	/** The launching executor's own child runtime when it is itself an in-process child. */
 	childRuntime?: import("../runs/shared/child-runtime-config.ts").ChildRuntimeConfig;
+	/** Live root-session Fast policy for native in-process children. */
+	sessionFastMode?: import("../runs/shared/session-fast-mode.ts").SessionFastModePolicy;
 	/** Fires once the child session exists and can be steered. */
 	onChildSession?: (controls: ForegroundChildSessionControls) => void;
 	/** Opt-in global permission rules; missing tools remain allowed. */
@@ -2591,6 +2593,16 @@ export interface ScheduledRunsConfig {
 	storeRoot?: string;
 }
 
+export interface ModelExclusionsConfig {
+	/** Default duration in milliseconds. A lower configured value also shortens active cached exclusions. */
+	defaultTtlMs?: number;
+}
+
+export interface SessionFastModeConfig {
+	/** Exact provider-independent model IDs eligible for the priority service tier. */
+	models?: string[];
+}
+
 export type FleetViewPlacement = "aboveEditor" | "belowEditor";
 
 export const FLEET_KEYBINDING_ACTIONS = [
@@ -2653,6 +2665,10 @@ export interface ExtensionConfig {
 	fleetKeybindings?: FleetKeybindingsConfig;
 	/** Show the under-editor async runs widget. Defaults to true, including when FleetView is enabled. */
 	asyncWidget?: boolean;
+	/** Configure the process-wide TTL policy for persisted model exclusions. */
+	modelExclusions?: ModelExclusionsConfig;
+	/** Configure root-session Fast routing by exact provider-independent model ID. */
+	fastMode?: SessionFastModeConfig;
 	/** Exact provider/model candidates mapped to operator-declared equivalent response IDs. Empty arrays add no accepted IDs. */
 	modelResponseAliases?: Record<string, string[]>;
 	/** Tool description variant registered for the parent-facing subagent tool. Defaults to split metadata. */

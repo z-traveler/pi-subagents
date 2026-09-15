@@ -17,7 +17,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setChildSessionFactoryModule } from "../../src/runs/shared/child-session.ts";
 import { createEventBus, createTempDir, events, makeAgent, removeTempDir } from "../support/helpers.ts";
-import { deliverInterruptRequest, deliverStopRequest, requestAsyncSteer } from "../../src/runs/background/control-channel.ts";
+import { deliverInterruptRequest, deliverStopRequest, requestAsyncSteer, writeSessionFastModeSnapshot } from "../../src/runs/background/control-channel.ts";
+import { SessionFastModePolicy } from "../../src/runs/shared/session-fast-mode.ts";
 import { SUBAGENT_PROCESS_TERMINAL_EVENT } from "../../src/shared/types.ts";
 import { waitForSubagents } from "../../src/runs/background/subagent-wait.ts";
 import type { AsyncResultPayload, AsyncStatusPayload } from "../support/async-execution-fixture.ts";
@@ -26,7 +27,7 @@ import {
 	childWatchdogStatus, available, isAsyncAvailable, executeAsyncSingle,
 	executeAsyncChain, ASYNC_DIR, RESULTS_DIR, TEMP_ROOT_DIR, escapeRegExp,
 	createRepo, waitForAsyncResultFile, waitForAsyncState, tempDir, mockPi,
-	readAsyncPayload, waitForMockPiCall,
+	readAsyncPayload, waitForAsyncEvent, waitForMockPiCall,
 } from "../support/async-execution-fixture.ts";
 
 describe("async execution utilities", { skip: !available ? "pi packages not available" : undefined }, () => {
@@ -157,6 +158,126 @@ export default function() {
 		assert.equal(report.pendingWrites, 0);
 		assert.equal(report.terminal[0].state, "failed");
 		assert.deepEqual(report.terminal[1], report.terminal[0]);
+	});
+
+	it("applies Session Fast snapshot updates to the next background native-child request", { timeout: 30_000, skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async (t) => {
+		const id = `async-session-fast-${Date.now().toString(36)}`;
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const factoryPath = path.join(tempDir, `${id}-factory.mjs`);
+		const initialPath = path.join(tempDir, `${id}-initial.json`);
+		const offPath = path.join(tempDir, `${id}-off.json`);
+		const onPath = path.join(tempDir, `${id}-on.json`);
+		fs.writeFileSync(factoryPath, `
+import fs from "node:fs";
+const initialPath = ${JSON.stringify(initialPath)};
+const offPath = ${JSON.stringify(offPath)};
+const onPath = ${JSON.stringify(onPath)};
+const publish = (filePath, value) => {
+  fs.writeFileSync(filePath + ".tmp", JSON.stringify(value));
+  fs.renameSync(filePath + ".tmp", filePath);
+};
+export default function() {
+  return {
+    async create(launch) {
+      const handlers = [];
+      const hook = launch.hooks.find(candidate => candidate.name === "pi-subagents:session-fast-mode");
+      if (!hook) throw new Error("Session Fast child hook was not installed");
+      hook.factory({ on(event, handler) { if (event === "before_provider_request") handlers.push(handler); } });
+      if (handlers.length !== 1) throw new Error("Session Fast provider hook was not registered exactly once");
+      const messages = [];
+      let listener;
+      const invoke = async () => {
+        const input = { model: "wire-model", service_tier: "default", keep: "unchanged" };
+        let output = input;
+        for (const handler of handlers) {
+          output = await handler(
+            { type: "before_provider_request", payload: output },
+            { model: { provider: "not-cliproxy", id: "gpt-5.6-sol" } },
+          ) ?? output;
+        }
+        return { input, output, launchModel: launch.model };
+      };
+      const waitTier = async (tier, filePath) => {
+        const deadline = Date.now() + 10_000;
+        for (;;) {
+          const proof = await invoke();
+          if (proof.output.service_tier === tier) {
+            publish(filePath, proof);
+            return;
+          }
+          if (Date.now() >= deadline) throw new Error("Timed out waiting for Session Fast tier " + tier);
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+      };
+      return {
+        sessionId: "session-fast-child", sessionFile: undefined,
+        modelId: launch.model, messages,
+        subscribe(next) { listener = next; return () => {}; },
+        async prompt() {
+          listener({ type: "agent_start" });
+          publish(initialPath, await invoke());
+          await waitTier("default", offPath);
+          await waitTier("priority", onPath);
+          const message = {
+            role: "assistant", content: [{ type: "text", text: "Session Fast propagation verified." }],
+            model: launch.model, stopReason: "stop",
+            usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+          };
+          messages.push(message);
+          listener({ type: "message_end", message });
+          listener({ type: "agent_end", messages: [...messages], willRetry: false });
+          listener({ type: "agent_settled" });
+        },
+        async steer() {}, async followUp() {}, async abort() {}, async dispose() {},
+      };
+    },
+    async dispose() {},
+  };
+}
+`);
+		const waitForProof = async (filePath: string): Promise<{ input: Record<string, unknown>; output: Record<string, unknown>; launchModel: string }> => {
+			const deadline = Date.now() + 15_000;
+			while (!fs.existsSync(filePath)) {
+				if (Date.now() >= deadline) assert.fail(`Timed out waiting for Session Fast proof: ${path.basename(filePath)}`);
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			}
+			return JSON.parse(fs.readFileSync(filePath, "utf8"));
+		};
+		setChildSessionFactoryModule(factoryPath);
+		t.after(() => setChildSessionFactoryModule(fileURLToPath(new URL("../support/runner-child-session-factory.ts", import.meta.url))));
+		const launched = executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Verify Session Fast propagation",
+			agentConfig: makeAgent("worker", { model: "alternate-provider/gpt-5.6-sol", completionGuard: false }),
+			ctx: {
+				pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1",
+				sessionFastMode: new SessionFastModePolicy(["gpt-5.6-sol"], true),
+			},
+			availableModels: [{ provider: "alternate-provider", id: "gpt-5.6-sol", fullId: "alternate-provider/gpt-5.6-sol" }],
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+			acceptance: false,
+		});
+		assert.equal(launched.isError, undefined, launched.content[0]?.text);
+
+		const initial = await waitForProof(initialPath);
+		writeSessionFastModeSnapshot(asyncDir, { version: 1, enabled: false, modelIds: ["gpt-5.6-sol"] });
+		const off = await waitForProof(offPath);
+		writeSessionFastModeSnapshot(asyncDir, { version: 1, enabled: true, modelIds: ["gpt-5.6-sol"] });
+		const on = await waitForProof(onPath);
+		const payload = JSON.parse(fs.readFileSync(await waitForAsyncResultFile(id), "utf8")) as AsyncResultPayload;
+		await waitForAsyncEvent(id, "subagent.run.process_terminal");
+
+		assert.deepEqual([initial.output.service_tier, off.output.service_tier, on.output.service_tier], ["priority", "default", "priority"]);
+		for (const proof of [initial, off, on]) {
+			assert.deepEqual(proof.input, { model: "wire-model", service_tier: "default", keep: "unchanged" });
+			assert.equal(proof.output.model, "wire-model");
+			assert.equal(proof.output.keep, "unchanged");
+			assert.equal(proof.launchModel, "alternate-provider/gpt-5.6-sol");
+		}
+		assert.equal(payload.success, true);
 	});
 
 	for (const mode of ["success", "stop", "pause", "deadline", "failure-before-JSON"] as const) {

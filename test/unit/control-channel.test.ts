@@ -19,12 +19,14 @@ import {
 	requestAsyncSteer,
 	requestAsyncStop,
 	requestAsyncTimeout,
+	sessionFastModeSnapshotPath,
 	timeoutRequestPath,
 	steerInboxClosedPath,
 	stopRequestsDir,
 	stopRequestPath,
 	steerRequestsDir,
 	watchAsyncControlInbox,
+	writeSessionFastModeSnapshot,
 } from "../../src/runs/background/control-channel.ts";
 
 function tmpAsyncDir(label: string): string {
@@ -37,6 +39,20 @@ function cleanup(asyncDir: string): void {
 }
 
 describe("control channel: request file", () => {
+	it("writes the current session Fast mode snapshot atomically into the control inbox", () => {
+		const asyncDir = tmpAsyncDir("pi-control-fast-write-");
+		try {
+			const snapshot = { version: 1 as const, enabled: true, modelIds: ["gpt-5.6-sol"] };
+			const snapshotPath = writeSessionFastModeSnapshot(asyncDir, snapshot);
+
+			assert.equal(snapshotPath, sessionFastModeSnapshotPath(asyncDir));
+			assert.deepEqual(JSON.parse(fs.readFileSync(snapshotPath, "utf-8")), snapshot);
+			assert.deepEqual(fs.readdirSync(path.dirname(snapshotPath)), [path.basename(snapshotPath)]);
+		} finally {
+			cleanup(asyncDir);
+		}
+	});
+
 	it("writes a parseable interrupt request, creating the inbox dir", () => {
 		const asyncDir = tmpAsyncDir("pi-control-write-");
 		try {
@@ -440,6 +456,130 @@ describe("control channel: watchAsyncControlInbox", () => {
 			dispose();
 		} finally {
 			cleanup(asyncDir);
+		}
+	});
+
+	it("delivers a session Fast mode snapshot that existed before the runner started without consuming it", () => {
+		const asyncDir = tmpAsyncDir("pi-control-fast-early-");
+		try {
+			const snapshot = { version: 1 as const, enabled: true, modelIds: ["gpt-5.6-sol"] };
+			writeSessionFastModeSnapshot(asyncDir, snapshot);
+			const seen: typeof snapshot[] = [];
+			const h = harness();
+			const dispose = watchAsyncControlInbox(asyncDir, {
+				onSessionFastMode: (next) => seen.push(next),
+				fs: h.fsImpl,
+				timers: h.timers,
+				platform: "linux",
+			});
+
+			assert.deepEqual(seen, [snapshot]);
+			assert.equal(fs.existsSync(sessionFastModeSnapshotPath(asyncDir)), true);
+			dispose();
+		} finally {
+			cleanup(asyncDir);
+		}
+	});
+
+	it("delivers the latest session Fast mode snapshot after the parent overwrites the sidecar", () => {
+		const asyncDir = tmpAsyncDir("pi-control-fast-update-");
+		try {
+			const initial = { version: 1 as const, enabled: false, modelIds: ["gpt-5.6-sol"] };
+			const updated = { version: 1 as const, enabled: true, modelIds: ["gpt-5.6-sol", "gpt-5.6-luna"] };
+			writeSessionFastModeSnapshot(asyncDir, initial);
+			const seen: Array<typeof initial | typeof updated> = [];
+			const h = harness();
+			const dispose = watchAsyncControlInbox(asyncDir, {
+				onSessionFastMode: (snapshot) => seen.push(snapshot),
+				fs: h.fsImpl,
+				timers: h.timers,
+				platform: "linux",
+			});
+
+			writeSessionFastModeSnapshot(asyncDir, updated);
+			h.trigger();
+
+			assert.deepEqual(seen, [initial, updated]);
+			assert.deepEqual(JSON.parse(fs.readFileSync(sessionFastModeSnapshotPath(asyncDir), "utf-8")), updated);
+			dispose();
+		} finally {
+			cleanup(asyncDir);
+		}
+	});
+
+	it("does not redeliver unchanged session Fast mode content on repeated scans", () => {
+		const asyncDir = tmpAsyncDir("pi-control-fast-dedupe-");
+		try {
+			const snapshot = { version: 1 as const, enabled: true, modelIds: ["gpt-5.6-sol"] };
+			writeSessionFastModeSnapshot(asyncDir, snapshot);
+			const seen: typeof snapshot[] = [];
+			const h = harness();
+			const dispose = watchAsyncControlInbox(asyncDir, {
+				onSessionFastMode: (next) => seen.push(next),
+				fs: h.fsImpl,
+				timers: h.timers,
+				platform: "linux",
+			});
+
+			h.trigger();
+			writeSessionFastModeSnapshot(asyncDir, snapshot);
+			h.trigger();
+
+			assert.deepEqual(seen, [snapshot]);
+			dispose();
+		} finally {
+			cleanup(asyncDir);
+		}
+	});
+
+	it("reports a malformed session Fast mode snapshot as a scan error without delivering it", () => {
+		const asyncDir = tmpAsyncDir("pi-control-fast-malformed-");
+		try {
+			fs.mkdirSync(path.dirname(sessionFastModeSnapshotPath(asyncDir)), { recursive: true });
+			fs.writeFileSync(sessionFastModeSnapshotPath(asyncDir), JSON.stringify({ version: 1, enabled: "yes", modelIds: [] }), "utf-8");
+			const seen: unknown[] = [];
+			const failures: string[] = [];
+			const h = harness();
+			const dispose = watchAsyncControlInbox(asyncDir, {
+				onSessionFastMode: (snapshot) => seen.push(snapshot),
+				onError: (_error, phase) => failures.push(phase),
+				fs: h.fsImpl,
+				timers: h.timers,
+				platform: "linux",
+			});
+
+			assert.deepEqual(seen, []);
+			assert.deepEqual(failures, ["scan"]);
+			assert.equal(fs.existsSync(sessionFastModeSnapshotPath(asyncDir)), true);
+			dispose();
+		} finally {
+			cleanup(asyncDir);
+		}
+	});
+
+	it("rejects empty or padded model IDs in a session Fast mode snapshot", () => {
+		for (const modelId of ["", " gpt-5.6-sol"]) {
+			const asyncDir = tmpAsyncDir("pi-control-fast-model-id-");
+			try {
+				fs.mkdirSync(path.dirname(sessionFastModeSnapshotPath(asyncDir)), { recursive: true });
+				fs.writeFileSync(sessionFastModeSnapshotPath(asyncDir), JSON.stringify({ version: 1, enabled: true, modelIds: [modelId] }), "utf-8");
+				const seen: unknown[] = [];
+				const failures: string[] = [];
+				const h = harness();
+				const dispose = watchAsyncControlInbox(asyncDir, {
+					onSessionFastMode: (snapshot) => seen.push(snapshot),
+					onError: (_error, phase) => failures.push(phase),
+					fs: h.fsImpl,
+					timers: h.timers,
+					platform: "linux",
+				});
+
+				assert.deepEqual(seen, []);
+				assert.deepEqual(failures, ["scan"]);
+				dispose();
+			} finally {
+				cleanup(asyncDir);
+			}
 		}
 	});
 

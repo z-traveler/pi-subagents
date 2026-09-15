@@ -158,6 +158,7 @@ import { HerdrExternalNeedsAttentionError, createHerdrExternalAdapter, prepareIn
 import { runExternalJob } from "../shared/external-job-runner.ts";
 import { createOrcaProgressTab, type OrcaProgressTab } from "../shared/orca-progress-tabs.ts";
 import type { ResolvedSubagentCapabilityCeiling } from "../shared/capability-ceiling.ts";
+import { SessionFastModePolicy, type SessionFastModeSnapshot } from "../shared/session-fast-mode.ts";
 import {
 	acceptChildWatchdogEvent,
 	applyChildWatchdogMessage,
@@ -194,6 +195,8 @@ export interface SubagentRunConfig {
 	childSessionFactoryModule?: string;
 	/** The launching executor's own child runtime when it was itself an in-process child. */
 	inheritedChildRuntime?: InheritedChildRuntime;
+	/** Last-value Session Fast policy captured by the launching session. */
+	sessionFastMode?: SessionFastModeSnapshot;
 	worktreeSetupHook?: string;
 	worktreeSetupHookTimeoutMs?: number;
 	worktreeBaseDir?: string;
@@ -712,6 +715,7 @@ interface SingleStepContext {
 	childSessions: ChildSessionFactory;
 	/** The launching executor's own child runtime; nested route, depth, and ceilings come from here. */
 	inheritedChildRuntime?: InheritedChildRuntime;
+	sessionFastMode?: SessionFastModePolicy;
 	registerInterrupt?: (interrupt: (() => void) | undefined) => void;
 	registerTimeout?: (interrupt: (() => void) | undefined) => void;
 	registerStop?: (stop: (() => void) | undefined) => void;
@@ -2098,6 +2102,10 @@ export async function runSubagent(
 	const overallStartTime = Date.now();
 	const shareEnabled = config.share === true;
 	const asyncDir = config.asyncDir;
+	const sessionFastMode = new SessionFastModePolicy(
+		config.sessionFastMode?.modelIds ?? [],
+		config.sessionFastMode?.enabled ?? false,
+	);
 	const handoffWorkflowKey = config.workflowKey;
 	const handoffChildRunId = handoffWorkflowKey ? id : undefined;
 	const statusPath = path.join(asyncDir, "status.json");
@@ -3608,6 +3616,7 @@ export async function runSubagent(
 	// it cannot deliver OS signals (e.g. ENOSYS on Windows) or when steering a
 	// live child. Interrupts still route into the same graceful interruptRunner().
 	const disposeControlInbox = watchAsyncControlInbox(asyncDir, {
+		onSessionFastMode: (snapshot) => sessionFastMode.applySnapshot(snapshot),
 		onInterrupt: interruptRunner,
 		onTimeout: timeoutRunner,
 		onStop: stopChildStep,
@@ -3966,6 +3975,7 @@ export async function runSubagent(
 					piPackageRoot: config.piPackageRoot,
 					childSessions,
 					inheritedChildRuntime: config.inheritedChildRuntime,
+					sessionFastMode,
 					childIntercomTarget: config.childIntercomTargets?.[fi],
 					orchestratorIntercomTarget: config.controlIntercomTarget,
 					nestedRoute: config.nestedRoute,
@@ -4383,6 +4393,7 @@ export async function runSubagent(
 							piPackageRoot: config.piPackageRoot,
 							childSessions,
 							inheritedChildRuntime: config.inheritedChildRuntime,
+							sessionFastMode,
 							childIntercomTarget: config.childIntercomTargets?.[fi],
 							orchestratorIntercomTarget: config.controlIntercomTarget,
 							nestedRoute: config.nestedRoute,
@@ -4777,6 +4788,7 @@ export async function runSubagent(
 				piPackageRoot: config.piPackageRoot,
 				childSessions,
 				inheritedChildRuntime: config.inheritedChildRuntime,
+				sessionFastMode,
 				childIntercomTarget: config.childIntercomTargets?.[flatIndex],
 				orchestratorIntercomTarget: config.controlIntercomTarget,
 				nestedRoute: config.nestedRoute,

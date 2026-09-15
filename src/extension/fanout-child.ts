@@ -6,6 +6,7 @@ import { discoverAgents } from "../agents/agents.ts";
 import { getArtifactsDir } from "../shared/artifacts.ts";
 import { createSubagentExecutor, type SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
 import { resolveWaitToolConfig } from "../runs/background/wait-config.ts";
+import { writeSessionFastModeSnapshot } from "../runs/background/control-channel.ts";
 import type { ChildRuntimeConfig } from "../runs/shared/child-runtime-config.ts";
 import { readNestedControlRequests, resolveInheritedNestedRoute, type NestedRoute, writeNestedControlResult } from "../runs/shared/nested-events.ts";
 import { deliverSubagentIntercomMessageEvent } from "../intercom/result-intercom.ts";
@@ -226,17 +227,35 @@ export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI, c
 
 	pi.registerTool(tool);
 	let unsubscribeAsyncStarted: (() => void) | undefined;
+	let unsubscribeSessionFastMode: (() => void) | undefined;
 	pi.on("session_start", (_event, ctx) => {
 		supervisorChannel.registerTools();
 		// The host applies the explicit allowlist to dynamic registration too.
 		if (!pi.getAllTools().some(tool => tool.name === NATIVE_SUPERVISOR_TOOL_NAME)) return;
 		// Downward asks belong to this coordinator, not its parent or persisted session file.
 		state.supervisorOwnerSessionId = ctx.sessionManager.getSessionId() || null;
+		unsubscribeSessionFastMode?.();
+		unsubscribeSessionFastMode = childConfig.sessionFastMode?.subscribe((snapshot) => {
+			for (const [id, child] of asyncChildren) {
+				try {
+					writeSessionFastModeSnapshot(child.dir, snapshot);
+				} catch (error) {
+					console.error(`Failed to update Session Fast mode for nested async run '${id}':`, error);
+				}
+			}
+		});
 		unsubscribeAsyncStarted = pi.events.on(SUBAGENT_ASYNC_STARTED_EVENT, (payload: unknown) => {
 			const info = payload as AsyncStartedEvent;
 			if (!info.id || !info.asyncDir || info.sessionId !== state.currentSessionId) return;
 			const agents = info.agents ?? (info.agent ? [info.agent] : []);
 			asyncChildren.set(info.id, { dir: info.asyncDir, agents });
+			if (childConfig.sessionFastMode) {
+				try {
+					writeSessionFastModeSnapshot(info.asyncDir, childConfig.sessionFastMode.snapshot());
+				} catch (error) {
+					console.error(`Failed to initialize Session Fast mode for nested async run '${info.id}':`, error);
+				}
+			}
 			supervisorChannel.activateTransport();
 		});
 		supervisorChannel.start();
@@ -244,6 +263,7 @@ export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI, c
 	});
 	pi.on("session_shutdown", () => {
 		unsubscribeAsyncStarted?.();
+		unsubscribeSessionFastMode?.();
 		asyncChildren.clear();
 		foregroundChannels.clear();
 		supervisorChannel.dispose();

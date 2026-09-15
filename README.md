@@ -50,6 +50,10 @@ Installing the extension does not start an automatic reviewer in the background.
 When you finish implementing, run a reviewer subagent before summarizing.
 ```
 
+## Session Fast routing
+
+After configuring eligible exact model IDs in `fastMode.models`, use `/fast` to toggle the current root session or `/fast on|off|status` to control it explicitly. Session Fast keeps the selected provider and model unchanged and requests `service_tier: "priority"` for eligible native Pi requests throughout the child tree. It remains independent from the per-launch `fast: true` option; external CLI and external-job runners are unaffected. See [Models](docs/models.md) and [Configuration](docs/configuration.md#fastmode).
+
 ## Builtin agents
 
 The extension ships with agents you can use immediately:
@@ -117,7 +121,7 @@ The full reference lives in `docs/`:
 | Doc | What's in it |
 |-----|--------------|
 | [Agents](https://github.com/nicobailon/pi-subagents/blob/main/docs/agents.md) | Custom agents, frontmatter reference, overriding builtins, tools, extensions, skills, per-agent memory. |
-| [Models](https://github.com/nicobailon/pi-subagents/blob/main/docs/models.md) | Single-model selection and launch, defaults, per-role overrides, recommended tiering, thinking levels, model scope enforcement, profiles. |
+| [Models](https://github.com/nicobailon/pi-subagents/blob/main/docs/models.md) | Model selection and model-class routing, per-role overrides, Session/Launch Fast routing, fallbacks, thinking levels, model scope enforcement, profiles. |
 | [Workflows](https://github.com/nicobailon/pi-subagents/blob/main/docs/workflows.md) | Orchestration patterns, prompt shortcuts, scripted workflows, worktree isolation, child-to-parent coordination, the recursion guard. |
 | [Watchdog](https://github.com/nicobailon/pi-subagents/blob/main/docs/watchdog.md) | The opt-in adversarial change reviewer, scope monitoring, LSP checks, and child tool permissions. |
 | [Tool reference](https://github.com/nicobailon/pi-subagents/blob/main/docs/tool-reference.md) | Every `subagent` parameter, management actions, status/control actions, acceptance gates, external CLI runners. |

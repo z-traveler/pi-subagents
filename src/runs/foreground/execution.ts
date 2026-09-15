@@ -458,6 +458,8 @@ async function runSingleAttempt(
 		forkCacheKey: options.context === "fork" ? deriveForkPromptCacheKey(options.parentSessionId) : undefined,
 		structuredOutput: options.structuredOutput,
 		fast: options.fast ?? agent.fast,
+		sessionFastMode: options.sessionFastMode ?? options.childRuntime?.sessionFastMode,
+		modelCandidates: shared.modelCandidates,
 		toolBudget: options.toolBudget,
 		permissionRules,
 		permissionAuditPath,
