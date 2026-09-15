@@ -78,6 +78,7 @@ For a native Pi `model_verification_failed` where your proxy accepts `claude-hai
 
 Replace `YOUR_PROVIDER` with the resolved Pi provider ID. Keep the outgoing model alias unchanged. This native remedy already exists in v0.65.1; it does not infer equivalence from provider prefixes or dates. The built-in external `claude-code` adapter does not invoke this verifier or use this setting. If an external run shows this diagnostic, identify the installed version, resolved runner kind/adapter, and error location before applying a native remedy. Thanks to [sixtus](https://github.com/sixtus) for the concrete request-ID/response-ID example in [#1922](https://github.com/nicobailon/pi-subagents/issues/1922).
 
+
 ## Tool activation lifecycle
 
 On Pi 0.86.1 or newer, when the model can take a new tool mid-conversation (see [`toolActivation`](#toolactivation)), a fresh unrestricted parent starts with `subagents_enable`, `bg_wait`, and `subagent_supervisor` active while `subagent` stays registered but inactive. Calling `subagents_enable({})` preserves unrelated active tools and exposes `subagent` on the next model request. It does not launch a child or infer authority from prompt keywords. With other models, a fresh parent starts with `subagent`, `bg_wait`, and `subagent_supervisor` active and no `subagents_enable`.
@@ -99,6 +100,36 @@ Controls how a new parent session offers the `subagent` tool. The default is `"a
 - `"eager"`: the loader is not registered, so `subagent` is active from the first request, as with `--exclude-tools subagents_enable`. A resumed session that recorded the loader changes its tool list once on the next request.
 
 The choice is made at session start or tree navigation, and only for a session with no messages. Resumed sessions keep the tools they recorded, and switching models mid-session does not change them. `"auto"` avoids only the loader's cache miss; other tool-list or provider changes can still miss the cache. An active `subagent` sends its full schema on every request. An invalid value is a config error, not a fallback to the default. Restart Pi after changing it.
+
+## `fastMode`
+
+In `~/.pi/agent/extensions/subagent/config.json`:
+
+```json
+{
+  "fastMode": {
+    "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+  }
+}
+```
+
+`models` is the exact, case-sensitive allowlist for the root session's `/fast` command. Matching uses Pi's current `model.id` and ignores the provider, so the same listed ID is eligible through any provider. IDs may contain `/`; no provider prefix is added or removed, and there is no fuzzy or family matching. Invalid, empty, or whitespace-padded entries fail config loading.
+
+Session Fast is off by default. `/fast` toggles it; `/fast on`, `/fast off`, and `/fast status` are also supported. When enabled on an eligible native Pi model, it adds or overwrites only `service_tier: "priority"` in the next provider request. It does not change the request's model, call `setModel`, or require a particular provider. State follows the active session branch and propagates to native foreground, background, resumed, and nested children; external CLI and external-job runners are unaffected.
+
+This setting is independent of the per-launch `fast: true` option and the semantic `subagents.modelPools.fast` pool. `/fast off` does not disable a child's separately configured Launch Fast option.
+
+## `modelExclusions`
+
+```json
+{
+  "modelExclusions": {
+    "defaultTtlMs": 300000
+  }
+}
+```
+
+Controls the duration, in milliseconds, for model exclusions. The default is `86400000` (24 hours), and the maximum is `8000000000000000` so generated expiry timestamps remain valid JavaScript dates. The extension applies this value when it starts or reloads. A lower configured value shortens active cached exclusions from their original `recordedAt`; it never extends an existing expiry. Authentication-related exclusions are ignored when Pi's `auth.json` was modified after the exclusion was recorded; other exclusion types are unaffected. Launches also warn when a candidate is skipped, including the cached reason and expiry. `PI_MODEL_EXCLUSIONS_PATH` changes the exclusion-store path but does not change this TTL.
 
 ## `toolDescriptionMode`
 

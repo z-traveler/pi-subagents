@@ -59,3 +59,19 @@ _Avoid_: Permanent ranking, quality-class inference
 **Exact-Model Launch**:
 A child launch that names one concrete model rather than a model class; automatic throughput-based model switching is disabled.
 _Avoid_: Model-class routing, implicit fallback list
+
+**Session Fast Routing**:
+A root-session mode that requests the priority service tier without changing Pi's logical model.
+_Avoid_: Launch Fast, fast model pool
+
+**Launch Fast**:
+The upstream per-child launch option that requests the priority service tier for supported native OpenAI-Codex models. It is independent of Session Fast Routing.
+_Avoid_: Session Fast Routing, fast model pool
+
+**Logical Model**:
+The provider-qualified model identity selected by Pi and retained for routing, reasoning, history, and fallback behavior.
+_Avoid_: Wire model, service tier
+
+**Fast-Eligible Model ID**:
+An exact model ID whose Fast capability is the same across every provider that serves it.
+_Avoid_: Provider/model mapping, inferred model family

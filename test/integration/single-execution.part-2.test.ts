@@ -885,6 +885,7 @@ if (!fs.existsSync(${JSON.stringify(holdPath)})) { console.log('{}'); } else {
 			sessionManager: {
 				getSessionId: () => "registered-delegation-session",
 				getSessionFile: () => path.join(tempDir, "registered-delegation-session.jsonl"),
+				getBranch: () => [],
 				getEntries: () => [],
 			},
 		};

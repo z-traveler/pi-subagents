@@ -72,6 +72,7 @@ import {
 } from "../../shared/types.ts";
 import { inheritedNestedParentAddressOf, inheritedNestedRouteOf, nestedResultsPath, nestedSummaryFromAsyncStatus, writeNestedEvent } from "../shared/nested-events.ts";
 import { SUBAGENT_PARENT_SESSION_ENV, type ChildRuntimeConfig } from "../shared/child-runtime-config.ts";
+import type { SessionFastModePolicy } from "../shared/session-fast-mode.ts";
 import { childSessionFactoryModule } from "../shared/child-session.ts";
 import { inheritedChildRuntime } from "../shared/child-launch.ts";
 import { resultFilePath } from "./result-files.ts";
@@ -187,8 +188,12 @@ interface AsyncExecutionContext {
 	interactive?: boolean;
 	/** The executor's own child runtime when the launch comes from an in-process child. */
 	childRuntime?: ChildRuntimeConfig;
+
 	/** The launching session's project trust; undefined when the host has no trust concept. */
 	projectTrusted?: boolean;
+
+	/** Live session policy captured into the detached runner at launch. */
+	sessionFastMode?: SessionFastModePolicy;
 }
 
 export const DEFAULT_ASYNC_TIMEOUT_MS = 30 * 60 * 1000;
@@ -1531,7 +1536,10 @@ export function executeAsyncChain(
 				piPackageRoot,
 				childSessionFactoryModule: childSessionFactoryModule(),
 				inheritedChildRuntime: inheritedChildRuntime(ctx.childRuntime),
+
 				projectTrusted: ctx.projectTrusted,
+
+				sessionFastMode: ctx.sessionFastMode?.snapshot(),
 				worktreeSetupHook,
 				worktreeSetupHookTimeoutMs,
 				worktreeBaseDir,
@@ -2160,6 +2168,7 @@ export function executeAsyncSingle(
 				childSessionFactoryModule: childSessionFactoryModule(),
 				projectTrusted: ctx.projectTrusted,
 				inheritedChildRuntime: inheritedChildRuntime(ctx.childRuntime),
+				sessionFastMode: ctx.sessionFastMode?.snapshot(),
 				worktreeSetupHook,
 				worktreeSetupHookTimeoutMs,
 				worktreeBaseDir,
