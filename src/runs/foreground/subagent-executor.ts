@@ -109,6 +109,7 @@ import { awaitExistingAsyncRun, claimWorkflowAwaitedResult } from "../background
 import { fallbackResultPayloadPathForSessionRun, removeResultIndex, resultFilePath, writeAsyncResultFile } from "../background/result-files.ts";
 import { attachRootChildrenToSteps, createNestedRoute, findNestedControlResult, inheritedNestedParentAddressOf, inheritedNestedRouteOf, nestedRunScope, resolveNestedAsyncDir, retainNestedLookupRoute, snapshotNestedEventFiles, updateForegroundNestedProjection, writeNestedControlRequest, writeNestedEvent, type NestedParentAddress, type NestedRoute, type NestedRunResolutionScope } from "../shared/nested-events.ts";
 import type { ChildRuntimeConfig } from "../shared/child-runtime-config.ts";
+import type { SessionFastModePolicy } from "../shared/session-fast-mode.ts";
 import { resolveSubagentRunId, type ResolvedSubagentRunId } from "../background/run-id-resolver.ts";
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
 import { isStoppableAsyncStatusStep, resolveAsyncStatusChild } from "../shared/child-identity.ts";
@@ -485,6 +486,12 @@ interface ExecutorDeps {
 	kill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean;
 	/** Set when this executor runs inside a child session; carries the runtime settings the host passes instead of environment variables. */
 	childRuntime?: ChildRuntimeConfig;
+	/** Root policy; nested executors inherit the same object through childRuntime. */
+	sessionFastMode?: SessionFastModePolicy;
+}
+
+function currentSessionFastMode(deps: Pick<ExecutorDeps, "childRuntime" | "sessionFastMode">): SessionFastModePolicy | undefined {
+	return deps.sessionFastMode ?? deps.childRuntime?.sessionFastMode;
 }
 
 function inheritedNestedRoute(deps: Pick<ExecutorDeps, "childRuntime">): NestedRoute | undefined {
@@ -1435,6 +1442,7 @@ function appendStepToAsyncChain(input: {
 		interactive: input.ctx.hasUI,
 		permissions: input.deps.config.permissions,
 		childRuntime: input.deps.childRuntime,
+		sessionFastMode: currentSessionFastMode(input.deps),
 	});
 	const built = buildAsyncRunnerSteps(resolved.id, compactOptional<Parameters<typeof buildAsyncRunnerSteps>[1]>({
 		chain: wrapChainTasksForFork(chain, contextPolicy),
@@ -1869,7 +1877,10 @@ async function resumeExternalJobFollowUp(input: {
 			interactive: input.ctx.hasUI,
 			permissions: input.deps.config.permissions,
 			childRuntime: input.deps.childRuntime,
+
 			projectTrusted: sessionProjectTrust(input.ctx),
+
+			sessionFastMode: currentSessionFastMode(input.deps),
 		}),
 		cwd: input.effectiveCwd,
 		artifactsDir,
@@ -2139,9 +2150,11 @@ async function resumeAsyncRun(input: {
 				modelScope,
 				modelResponseAliases: input.deps.config.modelResponseAliases,
 				interactive: input.ctx.hasUI,
+
 		permissions: input.deps.config.permissions,
 		childRuntime: input.deps.childRuntime,
 		projectTrusted: sessionProjectTrust(input.ctx),
+			sessionFastMode: currentSessionFastMode(input.deps),
 			}),
 			availableModels,
 			modelPools: discovered.modelPools,
@@ -2272,9 +2285,11 @@ async function resumeAsyncRun(input: {
 			// Absence in the retained contract is meaningful; never acquire current aliases.
 			modelResponseAliases: recoveryDescriptor ? recoveryDescriptor.modelResponseAliases : foregroundContract?.modelResponseAliases,
 			interactive: input.ctx.hasUI,
+
 		permissions: input.deps.config.permissions,
 		childRuntime: input.deps.childRuntime,
 		projectTrusted: sessionProjectTrust(input.ctx),
+			sessionFastMode: currentSessionFastMode(input.deps),
 		}),
 		cwd: effectiveCwd,
 		maxOutput: input.params.maxOutput ?? recoveryDescriptor?.maxOutput,
@@ -3601,7 +3616,10 @@ async function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		interactive: ctx.hasUI,
 		permissions: deps.config.permissions,
 		childRuntime: deps.childRuntime,
+
 		projectTrusted: sessionProjectTrust(ctx),
+
+		sessionFastMode: currentSessionFastMode(deps),
 	});
 	const availableModels: ModelInfo[] = ctx.modelRegistry.getAvailable().map(toModelInfo);
 	const currentMaxSubagentDepth = resolveCurrentMaxSubagentDepth(deps.config.maxSubagentDepth, deps.childRuntime);
@@ -4373,6 +4391,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 			onModelPerformanceProbe: ctx.hasUI
 				? (message, level) => ctx.ui.notify(message, level)
 				: undefined,
+			sessionFastMode: currentSessionFastMode(deps),
 			onChildSession: (controls) => { childSessionControls = controls; },
 			context: data.contextPolicy.contextForAgent(params.agent!),
 			unknownAgentDiagnosticContext: data.unknownAgentDiagnosticContext,

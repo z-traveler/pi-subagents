@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { createChildHooks } from "../../src/runs/shared/child-hooks.ts";
 import { buildInProcessChildLaunch } from "../../src/runs/shared/child-launch.ts";
 import { childSupervisorMetadata, evaluateChildToolDiagnostic, type ChildRuntimeConfig } from "../../src/runs/shared/child-runtime-config.ts";
+import { SessionFastModePolicy } from "../../src/runs/shared/session-fast-mode.ts";
 
 function baseConfig(overrides: Partial<ChildRuntimeConfig> = {}): ChildRuntimeConfig {
 	return { fanoutChild: false, depth: 1, waitTool: { enabled: true }, fast: false, ...overrides };
@@ -35,6 +36,41 @@ describe("child runtime config", () => {
 		assert.deepEqual(createChildHooks(baseConfig()).map((hook) => hook.name), ["pi-subagents:prompt-runtime"]);
 		assert.deepEqual(createChildHooks(baseConfig({ fast: true })).map((hook) => hook.name), ["pi-subagents:prompt-runtime", "pi-subagents:fast-mode"]);
 		assert.deepEqual(createChildHooks(baseConfig({ fanoutChild: true })).map((hook) => hook.name), ["pi-subagents:prompt-runtime", "pi-subagents:fanout-child"]);
+	});
+
+	it("applies the live Session Fast policy after the independent launch Fast hook", async () => {
+		const policy = new SessionFastModePolicy(["gpt-5.6-sol"]);
+		const hooks = createChildHooks(baseConfig({ fast: true, fanoutChild: true }), policy);
+		assert.deepEqual(hooks.map((hook) => hook.name), [
+			"pi-subagents:prompt-runtime",
+			"pi-subagents:fast-mode",
+			"pi-subagents:session-fast-mode",
+			"pi-subagents:fanout-child",
+		]);
+		const pi = fakePi([]);
+		for (const hook of hooks.filter((hook) => hook.name === "pi-subagents:session-fast-mode")) hook.factory(pi.api as never);
+		const payload = { model: "gpt-5.6-sol" };
+		assert.equal(await pi.handlers.get("before_provider_request")?.[0]?.({ payload }, { model: { id: "gpt-5.6-sol" } }), payload);
+
+		policy.setEnabled(true);
+
+		assert.deepEqual(await pi.handlers.get("before_provider_request")?.[0]?.({ payload }, { model: { id: "gpt-5.6-sol" } }), {
+			model: "gpt-5.6-sol",
+			service_tier: "priority",
+		});
+	});
+
+	it("keeps launch Fast effective when the independent Session Fast policy is off", async () => {
+		const policy = new SessionFastModePolicy(["gpt-5.6-sol"]);
+		const pi = fakePi([]);
+		for (const hook of createChildHooks(baseConfig({ fast: true }), policy)) hook.factory(pi.api as never);
+		let payload: unknown = { model: "gpt-5.6-sol" };
+		for (const handler of pi.handlers.get("before_provider_request") ?? []) {
+			payload = await handler({ payload }, { model: { id: "gpt-5.6-sol" } }) ?? payload;
+		}
+
+		assert.deepEqual(payload, { model: "gpt-5.6-sol", service_tier: "priority" });
+		assert.equal(policy.enabled, false);
 	});
 
 	it("provides the coordinator reply tool before agent_start without granting it to leaves", async () => {
