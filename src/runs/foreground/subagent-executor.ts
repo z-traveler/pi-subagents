@@ -474,7 +474,7 @@ interface ExecutorDeps {
 	getSubagentSessionRoot: (parentSessionFile: string | null) => string;
 	expandTilde: (p: string) => string;
 
-	discoverAgents: (cwd: string, scope: AgentScope, preferredModelProvider?: string) => { agents: AgentConfig[]; agentDiagnostics?: AgentDiscoveryDiagnostic[]; modelScope?: ModelScopeConfig; modelPools?: ModelPools; modelPoolSources?: ModelPoolSources; maxThinking?: AgentConfig["maxThinking"]; cwd?: string; scope?: AgentScope; directories?: UnknownAgentDiagnosticContext["directories"] };
+	discoverAgents: (cwd: string, scope: AgentScope, preferredModelProvider?: string) => { agents: AgentConfig[]; agentDiagnostics?: AgentDiscoveryDiagnostic[]; modelScope?: ModelScopeConfig; modelPools?: ModelPools; modelPoolSources?: ModelPoolSources; modelPerformance?: import("../shared/model-performance.ts").ModelPerformanceConfig; maxThinking?: AgentConfig["maxThinking"]; cwd?: string; scope?: AgentScope; directories?: UnknownAgentDiagnosticContext["directories"] };
 	discoverAgentsAll?: typeof discoverAgentsAll;
 	onAgentsChanged?: () => void;
 	allowMutatingManagementActions?: boolean;
@@ -546,6 +546,7 @@ interface ExecutionContextData {
 	modelScope?: ModelScopeConfig;
 	modelPools?: ModelPools;
 	modelPoolSources?: ModelPoolSources;
+	modelPerformance?: import("../shared/model-performance.ts").ModelPerformanceConfig;
 	parentModel?: ParentModel;
 	scopedModelIds?: string[];
 	parentSessionId: string | null;
@@ -2132,6 +2133,7 @@ async function resumeAsyncRun(input: {
 			availableModels,
 			modelPools: discovered.modelPools,
 			modelPoolSources: discovered.modelPoolSources,
+			modelPerformance: discovered.modelPerformance,
 			cwd: effectiveCwd,
 			maxOutput: input.params.maxOutput,
 			artifactsDir: getArtifactsDir(parentSessionFile, effectiveCwd, artifactConfig.dir),
@@ -2279,6 +2281,7 @@ async function resumeAsyncRun(input: {
 		modelOverride: target.model ?? recoveryDescriptor?.model,
 		modelCandidates: resolveRecoveryModelCandidates(target.model, recoveryDescriptor),
 		modelRouting: recoveryDescriptor?.modelRouting,
+		modelPerformance: discovered.modelPerformance,
 		fast: recoveryDescriptor?.fast,
 		modelOverrideFromParent: recoveryDescriptor?.modelOverrideFromParent,
 		modelOrigin: recoveryDescriptor?.modelOrigin ?? (recoveryDescriptor?.modelOverrideFromParent ? "inherited" : undefined),
@@ -3669,6 +3672,7 @@ async function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 			modelOverride,
 			modelCandidates: modelRouting?.modelCandidates,
 			modelRouting: modelRouting ? toModelRoutingSnapshot(modelRouting) : undefined,
+			modelPerformance: data.modelPerformance,
 			fast: params.fast,
 			modelOverrideFromParent,
 			modelOrigin,
@@ -4349,6 +4353,9 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 			parentSessionId: ctx.sessionManager.getSessionId() ?? undefined,
 			requiredExtensions,
 			childRuntime: deps.childRuntime,
+			onModelPerformanceProbe: ctx.hasUI
+				? (message, level) => ctx.ui.notify(message, level)
+				: undefined,
 			onChildSession: (controls) => { childSessionControls = controls; },
 			context: data.contextPolicy.contextForAgent(params.agent!),
 			unknownAgentDiagnosticContext: data.unknownAgentDiagnosticContext,
@@ -4384,6 +4391,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 			modelOverride,
 			modelCandidates: modelRouting.modelCandidates,
 			modelRouting: toModelRoutingSnapshot(modelRouting),
+			modelPerformance: data.modelPerformance,
 			fast: params.fast,
 			modelOverrideFromParent,
 			modelOrigin,
@@ -7725,6 +7733,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			modelScope,
 			modelPools: discovered.modelPools,
 			modelPoolSources: discovered.modelPoolSources,
+			modelPerformance: discovered.modelPerformance,
 			parentModel: requestParentModel,
 			scopedModelIds: scopedModelIdsFromContext(ctx),
 			parentSessionId: requestSessionId,
