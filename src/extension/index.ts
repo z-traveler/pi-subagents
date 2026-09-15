@@ -88,6 +88,8 @@ import { createInterruptedElsewhereCollector } from "../runs/background/interrup
 import { resolveMissionStoreLocation } from "../missions/store.ts";
 import { listRetainedChildren } from "../runs/background/retained-children.ts";
 import { registerNamedMainAgent } from "./main-agent.ts";
+import { registerMainModelPerformanceAdvisory } from "./main-model-performance.ts";
+import { createMainModelPerformanceProbe, formatModelPerformanceProbeResult } from "./main-model-performance-probe.ts";
 import {
 	type Details,
 	type MainWindowRendererConfig,
@@ -288,6 +290,15 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		return;
 	}
 	registerNamedMainAgent(pi);
+	registerMainModelPerformanceAdvisory(pi, {
+		probe: createMainModelPerformanceProbe({
+			onResult: (result, request) => {
+				if (result.status === "cancelled" || request.context.hasUI !== true) return;
+				const context = request.context as ExtensionContext;
+				context.ui.notify(formatModelPerformanceProbeResult(result), result.status === "sampled" ? "info" : "warning");
+			},
+		}),
+	});
 	const runtimeRegistry = getRuntimeRegistry();
 	setMainThinkingLevelSource(() => readMainThinkingLevel(() => pi.getThinkingLevel()));
 
