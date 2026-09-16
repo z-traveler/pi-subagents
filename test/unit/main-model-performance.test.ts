@@ -301,6 +301,70 @@ test("the registered Pi seam opens an Esc-dismissible advisory overlay without a
 	assert.equal(setModelCalls, 0, "main-agent monitoring must never change the model");
 });
 
+test("the model performance command closes its visible overlay when the editor regains focus", async () => {
+	let command: ((args: string, context: any) => Promise<void>) | undefined;
+	let focused: { handleInput(data: string): void } | undefined;
+	let overlay: { handleInput(data: string): void } | undefined;
+	let closed = 0;
+	let interrupted = 0;
+	const editor = { handleInput(data: string) { if (data === "\u001b") interrupted++; } };
+	const otherDialog = { handleInput() {} };
+	const listeners = new Set<(data: string) => { consume?: boolean } | undefined>();
+	const tui = { get focusedComponent() { return focused; } };
+	const pi = {
+		on() {},
+		registerCommand(_name: string, options: { handler: typeof command }) { command = options.handler; },
+		getThinkingLevel() { return "off"; },
+	};
+	const ctx = {
+		cwd: "/repo",
+		hasUI: true,
+		mode: "tui",
+		ui: {
+			onTerminalInput(listener: (data: string) => { consume?: boolean } | undefined) {
+				listeners.add(listener);
+				return () => listeners.delete(listener);
+			},
+			custom(factory: Function, options: { overlay?: boolean; onHandle?: (handle: any) => void }) {
+				assert.equal(options.overlay, true);
+				return new Promise<void>((resolve) => {
+					overlay = factory(tui, { fg: (_color: string, text: string) => text }, undefined, () => {
+						closed++;
+						focused = editor;
+						resolve();
+					});
+					focused = overlay;
+					options.onHandle?.({ isFocused: () => focused === overlay, isHidden: () => false });
+				});
+			},
+		},
+		model: { provider: "cliproxy", id: "fast-a" },
+		modelRegistry: { getAvailable: () => models },
+	};
+	registerMainModelPerformanceAdvisory(pi as never, {
+		store: { read: () => [], record() {}, invalidate() {} },
+		discover: () => ({ modelPools: { fast: ["cliproxy/fast-a"] }, modelPerformance: DEFAULT_MODEL_PERFORMANCE_CONFIG }),
+	});
+	assert.ok(command);
+	focused = editor;
+	const pending = command("", ctx);
+	assert.ok(overlay);
+	const sendEscape = () => {
+		for (const listener of listeners) if (listener("\u001b")?.consume) return;
+		focused?.handleInput("\u001b");
+	};
+
+	focused = otherDialog;
+	sendEscape();
+	assert.equal(closed, 0, "another dialog keeps its own Esc key");
+	focused = editor;
+	sendEscape();
+	assert.equal(closed, 1);
+	assert.equal(interrupted, 0);
+	await pending;
+	assert.equal(listeners.size, 0, "closing the overlay removes its terminal listener");
+});
+
 test("the main advisory overlay closes after its configured duration", async () => {
 	let now = 0;
 	let closed = 0;
