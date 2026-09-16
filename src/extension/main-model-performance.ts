@@ -433,39 +433,6 @@ class MainModelPerformanceOverlay implements Component {
 	}
 }
 
-function showMainModelPerformanceOverlay(
-	context: ExtensionContext,
-	lines: string[],
-	maxHeight: "80%" | "90%",
-	durationMs?: number,
-): Promise<void> {
-	let tui: { focusedComponent?: Component | null } | undefined;
-	let previousFocus: Component | null | undefined;
-	let overlay: MainModelPerformanceOverlay | undefined;
-	let unsubscribe: (() => void) | undefined;
-	const shown = context.ui.custom<void>(
-		(host, theme, _keybindings, done) => {
-			tui = host as unknown as { focusedComponent?: Component | null };
-			previousFocus = tui.focusedComponent;
-			overlay = new MainModelPerformanceOverlay(lines, theme, done, durationMs);
-			return overlay;
-		},
-		{
-			overlay: true,
-			overlayOptions: { anchor: "center", width: "85%", minWidth: 60, maxHeight, margin: 1 },
-			onHandle: (handle) => {
-				unsubscribe = context.ui.onTerminalInput((data) => {
-					if (!matchesKey(data, "escape") || handle.isHidden()) return;
-					if (!handle.isFocused() && (!previousFocus || tui?.focusedComponent !== previousFocus)) return;
-					overlay?.handleInput(data);
-					return { consume: true };
-				});
-			},
-		},
-	);
-	return shown.finally(() => unsubscribe?.());
-}
-
 export interface RegisterMainModelPerformanceOptions {
 	discover?: (cwd: string, preferredModelProvider?: string, options?: { projectTrusted?: boolean }) => Pick<AgentDiscoveryResult, "modelPools" | "modelPerformance">;
 	now?: () => number;
@@ -493,7 +460,10 @@ export function registerMainModelPerformanceAdvisory(
 			if (!uiContext.hasUI || uiContext.mode !== "tui") return;
 			const lines = formatMainModelPerformanceAdvisory(details).split("\n");
 			lines.push("Esc closes.");
-			void showMainModelPerformanceOverlay(uiContext, lines, "80%", durationMs).catch(() => {});
+			void uiContext.ui.custom<void>(
+				(_tui, theme, _keybindings, done) => new MainModelPerformanceOverlay(lines, theme, done, durationMs),
+				{ overlay: true, overlayOptions: { anchor: "center", width: "85%", minWidth: 60, maxHeight: "80%", margin: 1 } },
+			).catch(() => {});
 		},
 	};
 	if (options.now) runtimeOptions.now = options.now;
@@ -514,7 +484,10 @@ export function registerMainModelPerformanceAdvisory(
 				return;
 			}
 			const lines = formatMainModelPerformanceReport(runtime.snapshot(context));
-			await showMainModelPerformanceOverlay(context, lines, "90%");
+			await context.ui.custom<void>(
+				(_tui, theme, _keybindings, done) => new MainModelPerformanceOverlay(lines, theme, done),
+				{ overlay: true, overlayOptions: { anchor: "center", width: "85%", minWidth: 60, maxHeight: "90%", margin: 1 } },
+			);
 		},
 	});
 
