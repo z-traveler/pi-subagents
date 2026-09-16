@@ -168,6 +168,8 @@ Eligibility uses `model.id` only and is provider-independent. Matching is exact 
 
 The mode is off by default. `/fast` toggles it, `/fast on` and `/fast off` set it explicitly, and `/fast status` reports both the session state and whether the current model is eligible. The state is stored on the active session branch, so resume, reload, and fork restore the last branch value.
 
+While Session Fast is enabled, pi-subagents publishes the compact extension status `fast` for HUDs and footers that display Pi extension statuses. Turning the mode off clears it. The indicator represents the session-wide mode, not whether the current main-agent model is eligible, because eligible descendants may still use the priority tier.
+
 Changes apply to the next provider request made by the root agent or any native foreground, background, resumed, or nested Pi child in that session. An in-flight request is unchanged. Unsupported models remain on their normal service tier. External CLI and external-job runners are unaffected.
 
 Session Fast and Launch Fast are independent. They may both write the same priority tier; `/fast off` stops only Session Fast and does not disable a child's `fast: true` launch option.

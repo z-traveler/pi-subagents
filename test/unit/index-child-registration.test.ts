@@ -635,7 +635,7 @@ describe("subagent extension child mode", () => {
 				const widgets = [];
 				const ctx = {
 					cwd: process.cwd(), hasUI: true,
-					ui: { setWidget(key, value) { widgets.push({ key, value }); }, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } },
+					ui: { setStatus() {}, setWidget(key, value) { widgets.push({ key, value }); }, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } },
 					sessionManager: { getSessionId() { return "session-widget"; }, getSessionFile() { return null; }, getEntries() { return []; }, getBranch() { return []; } },
 					modelRegistry: { getAvailable() { return []; } },
 				};
@@ -676,7 +676,7 @@ describe("subagent extension child mode", () => {
 				const widgets = [];
 				const ctx = {
 					cwd: process.cwd(), hasUI: true,
-					ui: { setWidget(key, value) { widgets.push({ key, value }); }, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } },
+					ui: { setStatus() {}, setWidget(key, value) { widgets.push({ key, value }); }, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } },
 					sessionManager: { getSessionId() { return "session-widget"; }, getSessionFile() { return null; }, getEntries() { return []; }, getBranch() { return []; } },
 					modelRegistry: { getAvailable() { return []; } },
 				};
@@ -722,7 +722,7 @@ describe("subagent extension child mode", () => {
 			const sessionId = "session-" + runId;
 			const ctx = {
 				cwd: process.cwd(), hasUI: true,
-				ui: { setWidget(key, value) { widgets.push({ key, value }); }, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } },
+				ui: { setStatus() {}, setWidget(key, value) { widgets.push({ key, value }); }, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } },
 				sessionManager: { getSessionId() { return sessionId; }, getSessionFile() { return null; }, getEntries() { return []; }, getBranch() { return []; } },
 				modelRegistry: { getAvailable() { return []; } },
 			};
@@ -1183,7 +1183,7 @@ describe("subagent extension child mode", () => {
 					return true;
 				},
 				ui: {
-					setWidget() {}, requestRender() {}, setToolsExpanded() {}, getToolsExpanded() { return false; },
+					setStatus() {}, setWidget() {}, requestRender() {}, setToolsExpanded() {}, getToolsExpanded() { return false; },
 					theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } },
 				},
 				sessionManager: { getSessionId() { return "stale-ui-session"; }, getSessionFile() { return null; }, getEntries() { return []; }, getBranch() { return []; } },
