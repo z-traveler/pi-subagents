@@ -270,7 +270,7 @@ test("the registered Pi seam opens an Esc-dismissible advisory overlay without a
 		ui: {
 			custom: (factory: Function, options: { overlay?: boolean }) => {
 				assert.equal(options.overlay, true);
-				overlay = factory({}, {}, undefined, () => { closed++; overlay?.dispose?.(); });
+				overlay = factory({}, { fg: (_color: string, text: string) => text }, undefined, () => { closed++; overlay?.dispose?.(); });
 				return Promise.resolve();
 			},
 		},
@@ -293,7 +293,7 @@ test("the registered Pi seam opens an Esc-dismissible advisory overlay without a
 	now = DEFAULT_MODEL_PERFORMANCE_CONFIG.firstTokenTimeoutMs;
 	runtime.tick();
 
-	assert.match(overlay?.render(100).join("\n") ?? "", /Main model is responding slowly/);
+	assert.match(overlay?.render(100)[0] ?? "", /^╭.*Main model is responding slowly/);
 	overlay?.handleInput("\u001b");
 	assert.equal(closed, 1);
 	assert.equal(appended, 0);
@@ -408,20 +408,27 @@ test("model performance command shows cached measurements and order for every cl
 		model: { provider: "cliproxy", id: "fast-a" },
 		modelRegistry: { getAvailable: () => models },
 		ui: {
-			custom: async (factory: Function, options: { overlay?: boolean }) => {
+			custom: async (factory: Function, options: { overlay?: boolean; overlayOptions?: { width?: string } }) => {
 				assert.equal(options.overlay, true);
+				assert.equal(options.overlayOptions?.width, "85%");
 				let closed = false;
-				const component = factory({}, {}, undefined, () => { closed = true; });
-				const rendered = component.render(100).join("\n");
+				const theme = { fg: (_color: string, text: string) => text };
+				const component = factory({}, theme, undefined, () => { closed = true; });
+				const renderedLines: string[] = component.render(80);
+				const rendered = renderedLines.join("\n");
+				assert.match(renderedLines[0] ?? "", /^╭/);
+				assert.match(renderedLines.at(-1) ?? "", /^╰/);
 				assert.match(rendered, /fast/);
 				assert.match(rendered, /cliproxy\/fast-b/);
 				assert.match(rendered, /250ms TTFT.*40\.0 token\/s/);
-				assert.match(rendered, /1\. cliproxy\/fast-b \[configured 2\]/);
-				assert.match(rendered, /2\. cliproxy\/fast-a \[configured 1\]/);
+				assert.match(rendered, /1\. cliproxy\/fast-b/);
+				assert.match(rendered, /2\. cliproxy\/fast-a/);
+				assert.doesNotMatch(rendered, /\[configured \d+\]/);
 				assert.match(rendered, /smart/);
-				assert.match(rendered, /cliproxy\/smart-a.*unmeasured/);
-			component.handleInput("j");
-			assert.equal(component.render(100).join("\n"), rendered);
+				assert.match(rendered, /cliproxy\/smart-a.*no fresh sample/);
+				assert.match(rendered, /5 min/);
+				component.handleInput("j");
+				assert.equal(component.render(80).join("\n"), rendered);
 				component.handleInput("\u001b");
 				assert.equal(closed, true);
 			},
