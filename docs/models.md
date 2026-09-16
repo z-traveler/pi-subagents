@@ -147,7 +147,7 @@ The hard rolling window is 20 seconds and the soft rolling window is 30 seconds.
 
 The interactive main agent is advisory-only: pi-subagents never aborts or changes its model. When a response is slow, pi-subagents opens an overlay once per model per session. It closes automatically after `mainAdvisoryDurationMs` (30 seconds by default), or immediately with Esc. Set that value to `0` to suppress the overlay while keeping performance monitoring and background probes. If the current provider/model maps (ignoring thinking level) to exactly one configured class, the overlay recommends another candidate from that class and may probe alternatives for future routing; otherwise it shows a generic warning. The advisory is not inserted into model context or session entries.
 
-Use `/subagents-model-performance` in the Pi TUI to inspect every configured model class's cached first-token and generation-throughput measurements and candidate order in an overlay. The list shows ranked order and each candidate's configured position. The command reads cached observations; it does not start a new probe or switch the main model. Press Esc to close the overlay.
+Use `/subagents-model-performance` in the Pi TUI to inspect every configured model class's cached first-token and generation-throughput measurements and candidate order in a centered overlay. Fresh measurements determine the order; candidates without fresh samples retain their order from settings. The cache expires after `cacheTtlMs` (five minutes by default), so a previously measured candidate can show `no fresh sample`. The command reads the cache without starting a new probe or switching the main model. Press Esc to close the overlay.
 
 ## Launch Fast (`fast: true`)
 

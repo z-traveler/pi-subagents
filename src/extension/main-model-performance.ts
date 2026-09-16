@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { discoverAgents, type AgentDiscoveryResult } from "../agents/agents.ts";
 import { resolveModelCandidate, type AvailableModelInfo } from "../runs/shared/model-fallback.ts";
@@ -17,6 +17,7 @@ import {
 } from "../runs/shared/model-performance.ts";
 import { splitKnownThinkingSuffix, toModelInfo } from "../shared/model-info.ts";
 import { modelPoolDigest, type ModelPools } from "../shared/model-routing.ts";
+import { renderFooter, renderHeader, row } from "../tui/render-helpers.ts";
 
 export interface MainModelPerformanceRoute {
 	modelClass: string;
@@ -35,6 +36,7 @@ export interface MainModelPerformanceAdvisoryDetails {
 }
 
 export interface MainModelPerformanceSnapshot {
+	cacheTtlMs: number;
 	classes: Array<{
 		modelClass: string;
 		candidates: string[];
@@ -242,7 +244,7 @@ export class MainModelPerformanceRuntime {
 			const observations = this.readObservations(route, ttlMs);
 			return { modelClass, candidates, observations, rankedCandidates: rankModelCandidates(candidates, observations) };
 		});
-		return { classes };
+		return { cacheTtlMs: ttlMs, classes };
 	}
 
 	tick(): void {
@@ -365,7 +367,10 @@ export function formatMainModelPerformanceAdvisory(details: MainModelPerformance
 }
 
 export function formatMainModelPerformanceReport(snapshot: MainModelPerformanceSnapshot): string[] {
-	const lines = ["Model performance cache", "Ranked order (configured position in brackets):"];
+	const ttl = snapshot.cacheTtlMs % 60_000 === 0
+		? `${snapshot.cacheTtlMs / 60_000} min`
+		: `${snapshot.cacheTtlMs / 1_000}s`;
+	const lines = ["Model performance cache", `Order uses samples from last ${ttl}; otherwise settings order.`];
 	if (snapshot.classes.length === 0) lines.push("No configured model classes.");
 	for (const modelClass of snapshot.classes) {
 		lines.push("", `${modelClass.modelClass}:`);
@@ -374,8 +379,8 @@ export function formatMainModelPerformanceReport(snapshot: MainModelPerformanceS
 			const observation = observations.get(candidate);
 			const metric = observation
 				? `${observation.ttftMs.toFixed(0)}ms TTFT · ${observation.estimatedTokensPerSecond.toFixed(1)} token/s · ${observation.source}`
-				: "unmeasured";
-			lines.push(`  ${index + 1}. ${candidate} [configured ${modelClass.candidates.indexOf(candidate) + 1}] · ${metric}`);
+				: "no fresh sample";
+			lines.push(`  ${index + 1}. ${candidate} · ${metric}`);
 		}
 	}
 	lines.push("", "Esc closes.");
@@ -384,12 +389,14 @@ export function formatMainModelPerformanceReport(snapshot: MainModelPerformanceS
 
 class MainModelPerformanceOverlay implements Component {
 	private readonly lines: string[];
+	private readonly theme: Theme;
 	private readonly done: () => void;
 	private readonly timer?: ReturnType<typeof setTimeout>;
 	private closed = false;
 
-	constructor(lines: string[], done: () => void, durationMs?: number) {
+	constructor(lines: string[], theme: Theme, done: () => void, durationMs?: number) {
 		this.lines = lines;
+		this.theme = theme;
 		this.done = done;
 		if (durationMs !== undefined) {
 			this.timer = setTimeout(() => this.close(), durationMs);
@@ -404,7 +411,12 @@ class MainModelPerformanceOverlay implements Component {
 	invalidate(): void {}
 
 	render(width: number): string[] {
-		return this.lines.map((line) => truncateToWidth(line, Math.max(1, width)));
+		const panelWidth = Math.max(3, Math.floor(width));
+		return [
+			renderHeader(truncateToWidth(this.lines[0] ?? "", panelWidth - 2), panelWidth, this.theme),
+			...this.lines.slice(1, -1).map((line) => row(line, panelWidth, this.theme)),
+			renderFooter(this.lines.at(-1) ?? "", panelWidth, this.theme),
+		];
 	}
 
 	dispose(): void {
@@ -447,7 +459,7 @@ export function registerMainModelPerformanceAdvisory(
 			const lines = formatMainModelPerformanceAdvisory(details).split("\n");
 			lines.push("Esc closes.");
 			void uiContext.ui.custom<void>(
-				(_tui, _theme, _keybindings, done) => new MainModelPerformanceOverlay(lines, done, durationMs),
+				(_tui, theme, _keybindings, done) => new MainModelPerformanceOverlay(lines, theme, done, durationMs),
 				{ overlay: true, overlayOptions: { anchor: "center", width: "85%", minWidth: 60, maxHeight: "80%", margin: 1 } },
 			).catch(() => {});
 		},
@@ -471,8 +483,8 @@ export function registerMainModelPerformanceAdvisory(
 			}
 			const lines = formatMainModelPerformanceReport(runtime.snapshot(context));
 			await context.ui.custom<void>(
-				(_tui, _theme, _keybindings, done) => new MainModelPerformanceOverlay(lines, done),
-				{ overlay: true, overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%" } },
+				(_tui, theme, _keybindings, done) => new MainModelPerformanceOverlay(lines, theme, done),
+				{ overlay: true, overlayOptions: { anchor: "center", width: "85%", minWidth: 60, maxHeight: "90%", margin: 1 } },
 			);
 		},
 	});
