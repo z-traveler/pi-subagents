@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { keyText, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth, type Component, type KeyId, type TUI } from "@earendil-works/pi-tui";
+import { isKeyRelease, Key, matchesKey, truncateToWidth, type Component, type KeyId, type TUI } from "@earendil-works/pi-tui";
 import { discoverAgentSnapshot, discoverAgents, findBlockingAgentDiagnostic, formatUnknownAgentError, resolveAgentName, unknownAgentDiagnosticContext, type AgentConfig, type AgentDiscoveryDiagnostic, type AgentScope, type UnknownAgentDiagnosticContext } from "../agents/agents.ts";
 import { listRuntimeAgentConfigs, mergeRuntimeAgents } from "../agents/runtime-agent-registry.ts";
 import { resolveExistingReadPaths } from "../shared/settings.ts";
@@ -646,9 +646,18 @@ async function requestSlashRun(
 			}
 		};
 
+		let tui: TUI | undefined;
+		if (ctx.hasUI && ctx.mode === "tui") {
+			// Widget factories expose Pi's TUI reference; remove the empty widget immediately.
+			ctx.ui.setWidget("subagent-slash-input", (host) => {
+				tui = host;
+				return { render: () => [], invalidate() {} };
+			});
+			ctx.ui.setWidget("subagent-slash-input", undefined);
+		}
 		const onTerminalInput = ctx.hasUI
 			? ctx.ui.onTerminalInput((input) => {
-				if (!matchesKey(input, Key.escape)) return undefined;
+				if (isKeyRelease(input) || !matchesKey(input, Key.escape) || tui?.hasOverlay()) return undefined;
 				pi.events.emit(SLASH_SUBAGENT_CANCEL_EVENT, { requestId });
 				finish(() => reject(new Error("Cancelled")));
 				return { consume: true };
