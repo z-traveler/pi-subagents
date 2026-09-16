@@ -2,6 +2,12 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { SessionFastModePolicy, type SessionFastModeSnapshot } from "../runs/shared/session-fast-mode.ts";
 
 export const SESSION_FAST_MODE_ENTRY_TYPE = "pi-subagents:session-fast-mode";
+const SESSION_FAST_MODE_STATUS_KEY = SESSION_FAST_MODE_ENTRY_TYPE;
+
+function syncSessionFastModeStatus(ctx: ExtensionContext, policy: SessionFastModePolicy): void {
+	if (!ctx.hasUI) return;
+	ctx.ui.setStatus(SESSION_FAST_MODE_STATUS_KEY, policy.enabled ? "fast" : undefined);
+}
 
 function restoredSessionFastMode(ctx: ExtensionContext): boolean {
 	// Minimal hosts (and several test fixtures) expose no branch accessor; without branch
@@ -33,6 +39,7 @@ export function registerSessionFastMode(
 
 	pi.on("session_start", (_event, ctx) => {
 		policy.setEnabled(restoredSessionFastMode(ctx));
+		syncSessionFastModeStatus(ctx, policy);
 	});
 	pi.on("before_provider_request", (event, ctx) => policy.rewriteProviderRequest(event.payload, ctx.model?.id));
 	pi.registerCommand("fast", {
@@ -53,6 +60,7 @@ export function registerSessionFastMode(
 				pi.appendEntry(SESSION_FAST_MODE_ENTRY_TYPE, { enabled });
 				options.onChange?.(policy.snapshot());
 			}
+			syncSessionFastModeStatus(ctx, policy);
 			ctx.ui.notify(formatStatus(policy, ctx.model?.id), "info");
 		},
 	});
