@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, it } from "node:test";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { TUI, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
 import { registerAgent } from "../../src/api/agents.ts";
 import { clearRuntimeAgentsForPi } from "../../src/agents/runtime-agent-registry.ts";
@@ -12,6 +12,8 @@ import { updateActiveRunIndex } from "../../src/runs/background/active-run-index
 import { getArtifactPaths, getArtifactsDir } from "../../src/shared/artifacts.ts";
 import { ASYNC_DIR, DIRS } from "../../src/shared/types.ts";
 import type { WatchdogReviewFunction } from "../../src/watchdog/runtime.ts";
+import { registerSlashSubagentBridge } from "../../src/slash/slash-bridge.ts";
+import { registerMainModelPerformanceAdvisory } from "../../src/extension/main-model-performance.ts";
 
 const SLASH_RESULT_TYPE = "subagent-slash-result";
 const SLASH_SUBAGENT_REQUEST_EVENT = "subagent:slash:request";
@@ -204,6 +206,103 @@ async function withTempProject<T>(prefix: string, fn: (root: string) => Promise<
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 }
+
+describe("Esc while a slash agent is running", () => {
+	for (const inspector of ["subagents-fleet", "subagents-model-performance"]) {
+		it(`closes /${inspector} before cancelling the agent`, async () => {
+			await withIsolatedHome(() => withTempProject("pi-slash-escape-", async (root) => {
+				fs.writeFileSync(path.join(root, ".pi", "agents", "keyboard-worker.md"), "---\nname: keyboard-worker\ndescription: Keyboard test worker\n---\nWait for the test.\n");
+				const commands = new Map<string, RegisteredSlashCommand>();
+				const events = createEventBus();
+				let cancelEvents = 0;
+				events.on("subagent:slash:cancel", () => { cancelEvents++; });
+				const pi = {
+					events,
+					on() {},
+					registerCommand(name: string, spec: RegisteredSlashCommand) { commands.set(name, spec); },
+					registerShortcut() {},
+					sendMessage() {},
+					getThinkingLevel() { return "off"; },
+				};
+				let sendInput!: (data: string) => void;
+				const tui = new TUI({
+					columns: 100, rows: 40, kittyProtocolActive: false,
+					start(input: typeof sendInput) { sendInput = input; },
+					stop() {}, write() {}, hideCursor() {}, showCursor() {},
+				} as never);
+				// Exercise Pi's real terminal listener and focus dispatch without painting a screen.
+				tui.requestRender = () => {};
+				const editor: Component = { render: () => [], invalidate() {}, handleInput() {} };
+				tui.addChild(editor);
+				tui.setFocus(editor);
+				tui.start();
+				let closeDialog: (() => void) | undefined;
+				let dialogHasFocus: (() => boolean) | undefined;
+				const ctx = {
+					...createCommandContext({ cwd: root, hasUI: true }),
+					mode: "tui",
+				};
+				Object.assign(ctx.ui, {
+					setWidget: (_key: string, factory: unknown) => {
+						if (typeof factory === "function") factory(tui);
+					},
+					onTerminalInput: (handler: Parameters<TUI["addInputListener"]>[0]) => tui.addInputListener(handler),
+					custom: (factory: Function, options: any) => new Promise<void>((resolve) => {
+						const component = factory(tui, { fg: (_color: string, text: string) => text }, undefined, () => {
+							tui.hideOverlay();
+							component.dispose?.();
+							closeDialog = undefined;
+							resolve();
+						});
+						closeDialog = () => component.handleInput("\u001b");
+						const handle = tui.showOverlay(component, options.overlayOptions);
+						dialogHasFocus = handle.isFocused;
+						options.onHandle?.(handle);
+					}),
+				});
+				let runSignal: AbortSignal | undefined;
+				let finishRun: (() => void) | undefined;
+				const bridge = registerSlashSubagentBridge({
+					events,
+					getContext: () => ctx as never,
+					execute: (_id, _params, signal) => new Promise((resolve) => {
+						runSignal = signal;
+						finishRun = () => resolve({ content: [], details: { mode: "single", results: [] } });
+						signal.addEventListener("abort", finishRun, { once: true });
+					}),
+				});
+				const runtime = registerSlashCommands!(pi, createState(root));
+				registerMainModelPerformanceAdvisory(pi as never, { discover: () => ({}) });
+				try {
+					await commands.get("run")!.handler("keyboard-worker wait", ctx);
+					assert.ok(runSignal, "the slash command started the agent through its real bridge");
+					for (const escape of ["\u001b", "\u001b[27u"]) {
+						const opened = commands.get(inspector)!.handler("", ctx);
+						assert.ok(tui.hasOverlay());
+						assert.equal(dialogHasFocus?.(), true, "the inspector has keyboard focus before Esc");
+						sendInput(escape);
+						assert.deepEqual(
+							{ cancelEvents, aborted: runSignal.aborted, overlayOpen: tui.hasOverlay() },
+							{ cancelEvents: 0, aborted: false, overlayOpen: false },
+							"one Esc must close the focused inspector without cancelling the agent",
+						);
+						await opened;
+						sendInput("\u001b[27;1:3u");
+						assert.equal(runSignal.aborted, false, "releasing the Esc that closed the inspector must not cancel the agent");
+					}
+					sendInput("\u001b");
+					assert.equal(runSignal.aborted, true, "Esc in the main editor still cancels the slash agent");
+				} finally {
+					closeDialog?.();
+					finishRun?.();
+					runtime.dispose();
+					bridge.dispose();
+					tui.stop();
+				}
+			}));
+		});
+	}
+});
 
 function writeProjectChain(root: string, fileName: string, content: string): void {
 	fs.writeFileSync(path.join(root, ".pi", "chains", fileName), content, "utf-8");
