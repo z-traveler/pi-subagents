@@ -10,6 +10,7 @@ export interface ModelPerformanceConfig {
 	hardTokensPerSecond: number;
 	softTokensPerSecond: number;
 	cacheTtlMs: number;
+	mainAdvisoryDurationMs?: number;
 }
 
 export type ModelPerformanceConfigOverride = Partial<ModelPerformanceConfig>;
@@ -19,9 +20,10 @@ export const DEFAULT_MODEL_PERFORMANCE_CONFIG: Readonly<ModelPerformanceConfig> 
 	hardTokensPerSecond: 2,
 	softTokensPerSecond: 8,
 	cacheTtlMs: 300_000,
+	mainAdvisoryDurationMs: 30_000,
 });
 
-const CONFIG_FIELDS = ["firstTokenTimeoutMs", "hardTokensPerSecond", "softTokensPerSecond", "cacheTtlMs"] as const;
+const CONFIG_FIELDS = ["firstTokenTimeoutMs", "hardTokensPerSecond", "softTokensPerSecond", "cacheTtlMs", "mainAdvisoryDurationMs"] as const;
 
 // Settings JSON is deliberately validated at this I/O boundary before it
 // becomes ModelPerformanceConfigOverride.
@@ -42,8 +44,8 @@ export function parseModelPerformanceConfig(value: unknown, filePath: string): M
 	for (const field of CONFIG_FIELDS) {
 		const candidate = raw[field];
 		if (candidate === undefined) continue;
-		if (typeof candidate !== "number" || !Number.isFinite(candidate) || candidate <= 0) {
-			throw new Error(`Subagent settings in '${filePath}' have invalid 'modelPerformance.${field}'; expected a finite positive number.`);
+		if (typeof candidate !== "number" || !Number.isFinite(candidate) || candidate < 0 || (field !== "mainAdvisoryDurationMs" && candidate === 0)) {
+			throw new Error(`Subagent settings in '${filePath}' have invalid 'modelPerformance.${field}'; expected a finite ${field === "mainAdvisoryDurationMs" ? "nonnegative" : "positive"} number.`);
 		}
 		parsed[field] = candidate;
 	}
