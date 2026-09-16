@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Container, Spacer, Text, type Component } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { discoverAgents, type AgentDiscoveryResult } from "../agents/agents.ts";
 import { resolveModelCandidate, type AvailableModelInfo } from "../runs/shared/model-fallback.ts";
 import {
@@ -18,8 +18,6 @@ import {
 import { splitKnownThinkingSuffix, toModelInfo } from "../shared/model-info.ts";
 import { modelPoolDigest, type ModelPools } from "../shared/model-routing.ts";
 
-export const MAIN_MODEL_PERFORMANCE_ADVISORY_ENTRY_TYPE = "pi-subagents:main-model-performance-advisory";
-
 export interface MainModelPerformanceRoute {
 	modelClass: string;
 	poolDigest: string;
@@ -34,6 +32,15 @@ export interface MainModelPerformanceAdvisoryDetails {
 	recommendedModel?: string;
 	ttftMs: number;
 	estimatedTokensPerSecond?: number;
+}
+
+export interface MainModelPerformanceSnapshot {
+	classes: Array<{
+		modelClass: string;
+		candidates: string[];
+		observations: ModelPerformanceObservation[];
+		rankedCandidates: string[];
+	}>;
 }
 
 export interface MainPerformanceSettings {
@@ -67,7 +74,7 @@ export interface MainModelPerformanceRuntimeOptions {
 	store?: ModelPerformanceStoreLike;
 	getThinkingLevel?: () => string | undefined;
 	resolveSettings(context: MainPerformanceContext): MainPerformanceSettings;
-	display(details: MainModelPerformanceAdvisoryDetails, context: MainPerformanceContext): void;
+	display(details: MainModelPerformanceAdvisoryDetails, context: MainPerformanceContext, durationMs: number): void;
 	probe?: (request: MainModelPerformanceProbeRequest) => void | Promise<void>;
 }
 
@@ -130,7 +137,7 @@ function successfulAssistantMessage(message: { role?: unknown; stopReason?: unkn
 		&& (message.stopReason === "stop" || message.stopReason === "length" || message.stopReason === "toolUse");
 }
 
-function cacheKey(route: MainModelPerformanceRoute): ModelPerformanceCacheKey {
+function cacheKey(route: Pick<MainModelPerformanceRoute, "modelClass" | "poolDigest" | "candidates">): ModelPerformanceCacheKey {
 	return createModelPerformanceCacheKey(route, route.candidates);
 }
 
@@ -226,6 +233,18 @@ export class MainModelPerformanceRuntime {
 		this.stopTurn();
 	}
 
+	snapshot(context: MainPerformanceContext): MainModelPerformanceSnapshot {
+		const availableModels = context.modelRegistry.getAvailable().map(toModelInfo);
+		const ttlMs = (this.settings.modelPerformance ?? DEFAULT_MODEL_PERFORMANCE_CONFIG).cacheTtlMs;
+		const classes = Object.entries(this.settings.modelPools ?? {}).map(([modelClass, configuredCandidates]) => {
+			const candidates = canonicalModelCandidates(configuredCandidates, availableModels, context.model?.provider ?? "");
+			const route = { modelClass, poolDigest: modelPoolDigest(modelClass, candidates), candidates };
+			const observations = this.readObservations(route, ttlMs);
+			return { modelClass, candidates, observations, rankedCandidates: rankModelCandidates(candidates, observations) };
+		});
+		return { classes };
+	}
+
 	tick(): void {
 		if (this.turn) this.assess(this.turn, this.now());
 	}
@@ -259,6 +278,8 @@ export class MainModelPerformanceRuntime {
 			: [];
 		if (route && alternatives.length > 0) this.startProbe(turn, route, alternatives);
 
+		const durationMs = turn.config.mainAdvisoryDurationMs ?? 30_000;
+		if (durationMs === 0) return;
 		const warningKey = turn.currentModel;
 		if (this.warnedModels.has(warningKey)) return;
 		this.warnedModels.add(warningKey);
@@ -275,7 +296,7 @@ export class MainModelPerformanceRuntime {
 			if (route) details.modelClass = route.modelClass;
 			if (recommendedModel) details.recommendedModel = recommendedModel;
 			if (sample) details.estimatedTokensPerSecond = sample.estimatedTokensPerSecond;
-			this.options.display(details, turn.context);
+			this.options.display(details, turn.context, durationMs);
 		} catch {
 			// Advisory rendering is best effort and cannot affect the main response.
 		}
@@ -303,7 +324,7 @@ export class MainModelPerformanceRuntime {
 		}, turn.config.cacheTtlMs);
 	}
 
-	private readObservations(route: MainModelPerformanceRoute, ttlMs: number): ModelPerformanceObservation[] {
+	private readObservations(route: Pick<MainModelPerformanceRoute, "modelClass" | "poolDigest" | "candidates">, ttlMs: number): ModelPerformanceObservation[] {
 		try {
 			return this.store.read(cacheKey(route), ttlMs);
 		} catch {
@@ -335,34 +356,68 @@ export function formatMainModelPerformanceAdvisory(details: MainModelPerformance
 			? `No other ${details.modelClass} candidate can be recommended from the current pool.`
 			: "The current model does not map to exactly one configured model class, so no candidate is recommended.";
 	return [
-		"Main model is responding slowly",
+		"⚠ Main model is responding slowly",
 		`Current model: ${details.currentModel}`,
 		measurement,
-		"The current response is continuing; pi-subagents did not interrupt or switch the main model.",
+		"Current response continues; the main model was not switched.",
 		recommendation,
 	].join("\n");
 }
 
-function renderMainModelPerformanceAdvisory(
-	entry: { data?: MainModelPerformanceAdvisoryDetails },
-	options: { expanded: boolean },
-	theme: ExtensionContext["ui"]["theme"],
-): Component | undefined {
-	const details = entry.data;
-	if (!details) return undefined;
-	const lines = formatMainModelPerformanceAdvisory(details).split("\n");
-	const container = new Container();
-	container.addChild(new Text(theme.fg("warning", theme.bold(`⚠ ${lines[0]}`)), 0, 0));
-	if (options.expanded) {
-		container.addChild(new Spacer(1));
-		for (const line of lines.slice(1)) container.addChild(new Text(theme.fg("dim", line), 0, 0));
-	} else {
-		const summary = details.recommendedModel
-			? `  ⎿  consider ${details.recommendedModel}`
-			: `  ⎿  ${lines[2]}`;
-		container.addChild(new Text(theme.fg("dim", summary), 0, 0));
+export function formatMainModelPerformanceReport(snapshot: MainModelPerformanceSnapshot): string[] {
+	const lines = ["Model performance cache", "Ranked order (configured position in brackets):"];
+	if (snapshot.classes.length === 0) lines.push("No configured model classes.");
+	for (const modelClass of snapshot.classes) {
+		lines.push("", `${modelClass.modelClass}:`);
+		const observations = new Map(modelClass.observations.map((observation) => [observation.candidate, observation]));
+		for (const [index, candidate] of modelClass.rankedCandidates.entries()) {
+			const observation = observations.get(candidate);
+			const metric = observation
+				? `${observation.ttftMs.toFixed(0)}ms TTFT · ${observation.estimatedTokensPerSecond.toFixed(1)} token/s · ${observation.source}`
+				: "unmeasured";
+			lines.push(`  ${index + 1}. ${candidate} [configured ${modelClass.candidates.indexOf(candidate) + 1}] · ${metric}`);
+		}
 	}
-	return container;
+	lines.push("", "Esc closes.");
+	return lines;
+}
+
+class MainModelPerformanceOverlay implements Component {
+	private readonly lines: string[];
+	private readonly done: () => void;
+	private readonly timer?: ReturnType<typeof setTimeout>;
+	private closed = false;
+
+	constructor(lines: string[], done: () => void, durationMs?: number) {
+		this.lines = lines;
+		this.done = done;
+		if (durationMs !== undefined) {
+			this.timer = setTimeout(() => this.close(), durationMs);
+			this.timer.unref?.();
+		}
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "escape")) this.close();
+	}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		return this.lines.map((line) => truncateToWidth(line, Math.max(1, width)));
+	}
+
+	dispose(): void {
+		this.closed = true;
+		if (this.timer) clearTimeout(this.timer);
+	}
+
+	private close(): void {
+		if (this.closed) return;
+		this.closed = true;
+		if (this.timer) clearTimeout(this.timer);
+		this.done();
+	}
 }
 
 export interface RegisterMainModelPerformanceOptions {
@@ -377,7 +432,6 @@ export function registerMainModelPerformanceAdvisory(
 	pi: ExtensionAPI,
 	options: RegisterMainModelPerformanceOptions = {},
 ): MainModelPerformanceRuntime {
-	pi.registerEntryRenderer<MainModelPerformanceAdvisoryDetails>(MAIN_MODEL_PERFORMANCE_ADVISORY_ENTRY_TYPE, renderMainModelPerformanceAdvisory);
 	const discover = options.discover ?? ((cwd: string, provider?: string) => discoverAgents(cwd, "both", provider));
 	const runtimeOptions: MainModelPerformanceRuntimeOptions = {
 		resolveSettings: (context) => {
@@ -387,8 +441,15 @@ export function registerMainModelPerformanceAdvisory(
 				modelPerformance: discovered.modelPerformance ?? DEFAULT_MODEL_PERFORMANCE_CONFIG,
 			};
 		},
-		display: (details) => {
-			pi.appendEntry(MAIN_MODEL_PERFORMANCE_ADVISORY_ENTRY_TYPE, details);
+		display: (details, context, durationMs) => {
+			const uiContext = context as ExtensionContext;
+			if (!uiContext.hasUI || uiContext.mode !== "tui") return;
+			const lines = formatMainModelPerformanceAdvisory(details).split("\n");
+			lines.push("Esc closes.");
+			void uiContext.ui.custom<void>(
+				(_tui, _theme, _keybindings, done) => new MainModelPerformanceOverlay(lines, done, durationMs),
+				{ overlay: true, overlayOptions: { anchor: "center", width: "85%", minWidth: 60, maxHeight: "80%", margin: 1 } },
+			).catch(() => {});
 		},
 	};
 	if (options.now) runtimeOptions.now = options.now;
@@ -397,6 +458,24 @@ export function registerMainModelPerformanceAdvisory(
 	if (options.probe) runtimeOptions.probe = options.probe;
 	runtimeOptions.getThinkingLevel = () => pi.getThinkingLevel();
 	const runtime = new MainModelPerformanceRuntime(runtimeOptions);
+	pi.registerCommand("subagents-model-performance", {
+		description: "Inspect cached measurements and candidate order for every configured model class",
+		handler: async (args, context) => {
+			if (args.trim()) {
+				context.ui.notify("Usage: /subagents-model-performance", "error");
+				return;
+			}
+			if (!context.hasUI || context.mode !== "tui") {
+				if (context.hasUI) context.ui.notify("Model performance overlay requires the Pi TUI.", "info");
+				return;
+			}
+			const lines = formatMainModelPerformanceReport(runtime.snapshot(context));
+			await context.ui.custom<void>(
+				(_tui, _theme, _keybindings, done) => new MainModelPerformanceOverlay(lines, done),
+				{ overlay: true, overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%" } },
+			);
+		},
+	});
 
 	pi.on("session_start", (_event, context) => runtime.startSession(context));
 	pi.on("turn_start", (_event, context) => runtime.startTurn(context));
