@@ -130,6 +130,7 @@ describe("builtin agent overrides", () => {
 				modelPerformance: {
 					hardTokensPerSecond: 1,
 					softTokensPerSecond: 6,
+					mainAdvisoryDurationMs: 0,
 				},
 			},
 		});
@@ -139,6 +140,7 @@ describe("builtin agent overrides", () => {
 			hardTokensPerSecond: 1,
 			softTokensPerSecond: 6,
 			cacheTtlMs: 120_000,
+			mainAdvisoryDurationMs: 0,
 		});
 	});
 
