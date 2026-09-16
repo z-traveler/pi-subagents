@@ -37,6 +37,7 @@ describe("generation performance monitoring", () => {
 			hardTokensPerSecond: 2,
 			softTokensPerSecond: 8,
 			cacheTtlMs: 300_000,
+			mainAdvisoryDurationMs: 30_000,
 		});
 	});
 
