@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-	MAIN_MODEL_PERFORMANCE_ADVISORY_ENTRY_TYPE,
 	MainModelPerformanceRuntime,
 	formatMainModelPerformanceAdvisory,
 	registerMainModelPerformanceAdvisory,
@@ -43,10 +42,10 @@ test("maps the main model to exactly one model class while ignoring thinking", (
 	assert.equal(ambiguous, undefined);
 });
 
-test("a slow main response keeps running, emits one UI-only card, and warms alternatives", async () => {
+test("a slow main response keeps running, emits one advisory, and warms alternatives", async () => {
 	let now = 0;
 	let scheduled: (() => void) | undefined;
-	const entries: Array<{ type: string; details: MainModelPerformanceAdvisoryDetails }> = [];
+	const advisories: Array<{ details: MainModelPerformanceAdvisoryDetails; durationMs: number }> = [];
 	const probes: string[][] = [];
 	const observations: ModelPerformanceObservation[] = [{
 		candidate: "cliproxy/fast-b",
@@ -77,7 +76,7 @@ test("a slow main response keeps running, emits one UI-only card, and warms alte
 			modelPools: { fast: ["cliproxy/fast-a", "cliproxy/fast-b"] },
 			modelPerformance: DEFAULT_MODEL_PERFORMANCE_CONFIG,
 		}),
-		display: (details) => entries.push({ type: MAIN_MODEL_PERFORMANCE_ADVISORY_ENTRY_TYPE, details }),
+		display: (details, _context, durationMs) => advisories.push({ details, durationMs }),
 		probe: ({ candidates }) => { probes.push([...candidates]); },
 	});
 
@@ -87,10 +86,40 @@ test("a slow main response keeps running, emits one UI-only card, and warms alte
 	scheduled?.();
 	scheduled?.();
 
-	assert.equal(entries.length, 1, "the same slow model must not spam the main transcript");
+	assert.equal(advisories.length, 1, "the same slow model must not reopen the advisory");
+	assert.equal(advisories[0]?.durationMs, 30_000);
 	assert.deepEqual(probes, [["cliproxy/fast-b"]]);
-	assert.match(formatMainModelPerformanceAdvisory(entries[0]!.details), /did not interrupt or switch/i);
-	assert.match(formatMainModelPerformanceAdvisory(entries[0]!.details), /cliproxy\/fast-b/);
+	assert.match(formatMainModelPerformanceAdvisory(advisories[0]!.details), /main model was not switched/i);
+	assert.match(formatMainModelPerformanceAdvisory(advisories[0]!.details), /cliproxy\/fast-b/);
+});
+
+test("zero advisory duration suppresses the popup without disabling background probes", () => {
+	let now = 0;
+	let displays = 0;
+	let probes = 0;
+	const ctx = {
+		cwd: "/repo",
+		hasUI: true,
+		model: { provider: "cliproxy", id: "fast-a" },
+		modelRegistry: { getAvailable: () => models },
+	};
+	const runtime = new MainModelPerformanceRuntime({
+		now: () => now,
+		schedule: () => () => {},
+		store: { read: () => [], record() {}, invalidate() {} },
+		resolveSettings: () => ({
+			modelPools: { fast: ["cliproxy/fast-a", "cliproxy/fast-b"] },
+			modelPerformance: { ...DEFAULT_MODEL_PERFORMANCE_CONFIG, mainAdvisoryDurationMs: 0 },
+		}),
+		display: () => { displays++; },
+		probe: () => { probes++; },
+	});
+	runtime.startSession(ctx);
+	runtime.startTurn(ctx);
+	now = DEFAULT_MODEL_PERFORMANCE_CONFIG.firstTokenTimeoutMs;
+	runtime.tick();
+	assert.equal(displays, 0);
+	assert.equal(probes, 1);
 });
 
 test("records main workload throughput and invalidates an old sample on a first-token stall", () => {
@@ -214,11 +243,13 @@ test("a tolerably slow rolling rate is advisory and waits for the main response 
 	assert.equal(advisories.length, 1);
 });
 
-test("the registered Pi seam displays an advisory as a custom entry, outside agent context", () => {
+test("the registered Pi seam opens an Esc-dismissible advisory overlay without adding a card", () => {
 	let now = 0;
 	const handlers = new Map<string, Array<(event: any, ctx: any) => void>>();
-	const appended: Array<{ type: string; data: MainModelPerformanceAdvisoryDetails }> = [];
-	const renderers = new Map<string, Function>();
+	let overlay: { render(width: number): string[]; handleInput(data: string): void; dispose?(): void } | undefined;
+	let closed = 0;
+	let appended = 0;
+	let renderers = 0;
 	let setModelCalls = 0;
 	const pi = {
 		on(name: string, handler: (event: any, ctx: any) => void) {
@@ -226,15 +257,23 @@ test("the registered Pi seam displays an advisory as a custom entry, outside age
 			existing.push(handler);
 			handlers.set(name, existing);
 		},
-		registerEntryRenderer(type: string, renderer: Function) { renderers.set(type, renderer); },
-		appendEntry(type: string, data: MainModelPerformanceAdvisoryDetails) { appended.push({ type, data }); },
+		registerEntryRenderer() { renderers++; },
+		registerCommand() {},
+		appendEntry() { appended++; },
 		getThinkingLevel() { return "off"; },
 		setModel() { setModelCalls++; },
 	};
 	const ctx = {
 		cwd: "/repo",
 		hasUI: true,
-		ui: { notify() {} },
+		mode: "tui",
+		ui: {
+			custom: (factory: Function, options: { overlay?: boolean }) => {
+				assert.equal(options.overlay, true);
+				overlay = factory({}, {}, undefined, () => { closed++; overlay?.dispose?.(); });
+				return Promise.resolve();
+			},
+		},
 		model: { provider: "cliproxy", id: "fast-a" },
 		modelRegistry: { getAvailable: () => models },
 	};
@@ -254,10 +293,46 @@ test("the registered Pi seam displays an advisory as a custom entry, outside age
 	now = DEFAULT_MODEL_PERFORMANCE_CONFIG.firstTokenTimeoutMs;
 	runtime.tick();
 
-	assert.equal(appended.length, 1);
-	assert.equal(appended[0]?.type, MAIN_MODEL_PERFORMANCE_ADVISORY_ENTRY_TYPE);
-	assert.ok(renderers.has(MAIN_MODEL_PERFORMANCE_ADVISORY_ENTRY_TYPE));
+	assert.match(overlay?.render(100).join("\n") ?? "", /Main model is responding slowly/);
+	overlay?.handleInput("\u001b");
+	assert.equal(closed, 1);
+	assert.equal(appended, 0);
+	assert.equal(renderers, 0);
 	assert.equal(setModelCalls, 0, "main-agent monitoring must never change the model");
+});
+
+test("the main advisory overlay closes after its configured duration", async () => {
+	let now = 0;
+	let closed = 0;
+	const pi = {
+		on() {},
+		registerCommand() {},
+		getThinkingLevel() { return "off"; },
+	};
+	const ctx = {
+		cwd: "/repo",
+		hasUI: true,
+		mode: "tui",
+		ui: {
+			custom: (factory: Function) => new Promise<void>((resolve) => {
+				const overlay = factory({}, {}, undefined, () => { closed++; overlay.dispose?.(); resolve(); });
+			}),
+		},
+		model: { provider: "cliproxy", id: "fast-a" },
+		modelRegistry: { getAvailable: () => models },
+	};
+	const runtime = registerMainModelPerformanceAdvisory(pi as never, {
+		now: () => now,
+		schedule: () => () => {},
+		store: { read: () => [], record() {}, invalidate() {} },
+		discover: () => ({ modelPerformance: { ...DEFAULT_MODEL_PERFORMANCE_CONFIG, mainAdvisoryDurationMs: 5 } }),
+	});
+	runtime.startSession(ctx);
+	runtime.startTurn(ctx);
+	now = DEFAULT_MODEL_PERFORMANCE_CONFIG.firstTokenTimeoutMs;
+	runtime.tick();
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.equal(closed, 1);
 });
 
 test("headless sessions stay silent and ambiguous class matches show only a generic UI advisory", () => {
@@ -300,4 +375,60 @@ test("headless sessions stay silent and ambiguous class matches show only a gene
 	assert.equal(displayed[0]?.recommendedModel, undefined);
 	assert.match(formatMainModelPerformanceAdvisory(displayed[0]!), /does not map to exactly one configured model class/);
 	assert.equal(probes, 0);
+});
+
+test("model performance command shows cached measurements and order for every class without scrolling", async () => {
+	const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
+	const pi = {
+		on() {},
+		registerCommand(name: string, command: { handler: (args: string, ctx: any) => Promise<void> }) { commands.set(name, command); },
+		getThinkingLevel() { return "off"; },
+	};
+	const runtime = registerMainModelPerformanceAdvisory(pi as never, {
+		store: {
+			read: (key: ModelPerformanceCacheKey) => key.modelClass === "fast" ? [{
+				candidate: "cliproxy/fast-b",
+				recordedAt: 1_000,
+				ttftMs: 250,
+				estimatedTokensPerSecond: 40,
+				source: "probe" as const,
+			}] : [],
+			record() {},
+			invalidate() {},
+		},
+		discover: () => ({
+			modelPools: { fast: ["cliproxy/fast-a", "cliproxy/fast-b"], smart: ["cliproxy/smart-a"] },
+			modelPerformance: DEFAULT_MODEL_PERFORMANCE_CONFIG,
+		}),
+	});
+	const ctx = {
+		cwd: "/repo",
+		hasUI: true,
+		mode: "tui",
+		model: { provider: "cliproxy", id: "fast-a" },
+		modelRegistry: { getAvailable: () => models },
+		ui: {
+			custom: async (factory: Function, options: { overlay?: boolean }) => {
+				assert.equal(options.overlay, true);
+				let closed = false;
+				const component = factory({}, {}, undefined, () => { closed = true; });
+				const rendered = component.render(100).join("\n");
+				assert.match(rendered, /fast/);
+				assert.match(rendered, /cliproxy\/fast-b/);
+				assert.match(rendered, /250ms TTFT.*40\.0 token\/s/);
+				assert.match(rendered, /1\. cliproxy\/fast-b \[configured 2\]/);
+				assert.match(rendered, /2\. cliproxy\/fast-a \[configured 1\]/);
+				assert.match(rendered, /smart/);
+				assert.match(rendered, /cliproxy\/smart-a.*unmeasured/);
+			component.handleInput("j");
+			assert.equal(component.render(100).join("\n"), rendered);
+				component.handleInput("\u001b");
+				assert.equal(closed, true);
+			},
+		},
+	};
+	runtime.startSession(ctx);
+	const command = commands.get("subagents-model-performance");
+	assert.ok(command);
+	await command.handler("", ctx);
 });

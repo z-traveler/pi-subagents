@@ -136,7 +136,8 @@ The optional settings below override the defaults; project settings win field by
       "firstTokenTimeoutMs": 45000,
       "hardTokensPerSecond": 2,
       "softTokensPerSecond": 8,
-      "cacheTtlMs": 300000
+      "cacheTtlMs": 300000,
+      "mainAdvisoryDurationMs": 30000
     }
   }
 }
@@ -144,7 +145,9 @@ The optional settings below override the defaults; project settings win field by
 
 The hard rolling window is 20 seconds and the soft rolling window is 30 seconds. `hardTokensPerSecond` must be lower than `softTokensPerSecond`.
 
-The interactive main agent is advisory-only: pi-subagents never aborts or changes its model. When a response is slow, Pi displays a UI-only card. If the current provider/model maps (ignoring thinking level) to exactly one configured class, the card recommends another candidate from that class and may probe alternatives for future routing; otherwise it shows a generic warning. The card is not inserted into model context.
+The interactive main agent is advisory-only: pi-subagents never aborts or changes its model. When a response is slow, pi-subagents opens an overlay once per model per session. It closes automatically after `mainAdvisoryDurationMs` (30 seconds by default), or immediately with Esc. Set that value to `0` to suppress the overlay while keeping performance monitoring and background probes. If the current provider/model maps (ignoring thinking level) to exactly one configured class, the overlay recommends another candidate from that class and may probe alternatives for future routing; otherwise it shows a generic warning. The advisory is not inserted into model context or session entries.
+
+Use `/subagents-model-performance` in the Pi TUI to inspect every configured model class's cached first-token and generation-throughput measurements and candidate order in an overlay. The list shows ranked order and each candidate's configured position. The command reads cached observations; it does not start a new probe or switch the main model. Press Esc to close the overlay.
 
 ## Launch Fast (`fast: true`)
 
