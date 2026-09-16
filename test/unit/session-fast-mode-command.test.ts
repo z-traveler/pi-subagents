@@ -17,9 +17,10 @@ test("bare /fast toggles Session Fast routing for the next main-agent request", 
 		appendEntry(type: string, data: unknown) { entries.push({ type, data }); },
 	};
 	const ctx = {
+		hasUI: true,
 		model: { provider: "cliproxy", id: "gpt-5.6-sol" },
 		sessionManager: { getBranch() { return []; } },
-		ui: { notify(message: string) { notices.push(message); } },
+		ui: { notify(message: string) { notices.push(message); }, setStatus() {} },
 	};
 
 	registerSessionFastMode(pi as never, ["gpt-5.6-sol"]);
@@ -36,19 +37,24 @@ test("bare /fast toggles Session Fast routing for the next main-agent request", 
 	assert.match(notices.at(-1) ?? "", /Fast mode: on/);
 });
 
-test("/fast on, off, and status set or report the current session mode", async () => {
+test("/fast on and off show or clear Session Fast in the HUD", async () => {
 	const commands = new Map<string, { handler: (args: string, ctx: never) => Promise<void> }>();
 	const entries: Array<{ type: string; data: unknown }> = [];
 	const notices: string[] = [];
 	const changed: unknown[] = [];
+	const statuses: Array<{ key: string; text: string | undefined }> = [];
 	const pi = {
 		registerCommand(name: string, command: { handler: (args: string, ctx: never) => Promise<void> }) { commands.set(name, command); },
 		on() {},
 		appendEntry(type: string, data: unknown) { entries.push({ type, data }); },
 	};
 	const ctx = {
+		hasUI: true,
 		model: { provider: "cliproxy", id: "gpt-5.6-sol" },
-		ui: { notify(message: string) { notices.push(message); } },
+		ui: {
+			notify(message: string) { notices.push(message); },
+			setStatus(key: string, text: string | undefined) { statuses.push({ key, text }); },
+		},
 	};
 
 	registerSessionFastMode(pi as never, ["gpt-5.6-sol"], { onChange: (snapshot) => changed.push(snapshot) });
@@ -63,6 +69,9 @@ test("/fast on, off, and status set or report the current session mode", async (
 		{ version: 1, enabled: false, modelIds: ["gpt-5.6-sol"] },
 	]);
 	assert.deepEqual(notices.map((notice) => notice.match(/Fast mode: (on|off)/)?.[1]), ["on", "on", "off"]);
+	assert.deepEqual(statuses.map(({ text }) => text), ["fast", undefined]);
+	assert.ok(statuses[0]?.key);
+	assert.equal(statuses[0]?.key, statuses[1]?.key);
 });
 
 test("/fast rejects unknown arguments without changing the session mode", async () => {
@@ -87,6 +96,7 @@ test("/fast rejects unknown arguments without changing the session mode", async 
 
 test("session start restores the newest Fast mode entry on the active branch", async () => {
 	const handlers = new Map<string, Array<(event: never, ctx: never) => unknown>>();
+	const statuses: Array<{ key: string; text: string | undefined }> = [];
 	const pi = {
 		registerCommand() {},
 		on(name: string, handler: (event: never, ctx: never) => unknown) {
@@ -95,7 +105,11 @@ test("session start restores the newest Fast mode entry on the active branch", a
 		appendEntry() {},
 	};
 	const ctx = {
+		hasUI: true,
 		model: { provider: "another-provider", id: "gpt-5.6-sol" },
+		ui: {
+			setStatus(key: string, text: string | undefined) { statuses.push({ key, text }); },
+		},
 		sessionManager: {
 			getBranch() {
 				return [
@@ -113,4 +127,5 @@ test("session start restores the newest Fast mode entry on the active branch", a
 	const rewritten = await handlers.get("before_provider_request")?.[0]?.({ payload } as never, ctx as never);
 
 	assert.deepEqual(rewritten, { model: "gpt-5.6-sol", service_tier: "priority" });
+	assert.deepEqual(statuses.map(({ text }) => text), ["fast"]);
 });
