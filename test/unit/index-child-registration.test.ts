@@ -213,7 +213,7 @@ describe("subagent extension child mode", () => {
 		);
 	});
 
-	it("does not animate foreground results on a timer", () => {
+	it("advances the running result glyph between progress events and stops on settle", () => {
 		const script = String.raw`
 			import registerSubagentExtension from "./index.ts";
 			const events = { on() { return () => {}; }, emit() {} };
@@ -226,28 +226,54 @@ describe("subagent extension child mode", () => {
 			}, { get(target, prop) { return prop in target ? target[prop] : () => undefined; } });
 			registerSubagentExtension(fakePi);
 			if (!registeredTool) throw new Error("tool not registered");
-			let invalidations = 0;
-			let legacyTicks = 0;
-			const context = {
-				state: { subagentResultAnimationTimer: setInterval(() => { legacyTicks += 1; }, 10) },
-				invalidate() { invalidations += 1; },
+			const theme = { fg(_name, text) { return text; }, bold(text) { return text; } };
+			const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+			const glyphOf = (component) => component.render(180).join("\n").match(/[\u2800-\u28ff\u25cf]/u)?.[0] ?? "";
+			const progress = {
+				status: "running", index: 0, agent: "worker", toolCount: 2, tokens: 100,
+				durationMs: 1_000, lastActivityAt: 1_000, currentToolStartedAt: 500, turnCount: 1,
 			};
-			registeredTool.renderResult({
-				content: [{ type: "text", text: "running" }],
+			const resultFor = (status) => ({
+				content: [{ type: "text", text: status }],
 				details: {
 					mode: "single",
 					results: [{
 						agent: "worker", task: "quiet", exitCode: 0, messages: [],
-						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
-						progress: { status: "running", index: 0, agent: "worker", toolCount: 0, tokens: 0, durationMs: 0 },
+						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 1 },
+						progress: { ...progress, status },
 					}],
 				},
-			}, { expanded: false }, { fg(_name, text) { return text; }, bold(text) { return text; } }, context);
-			await new Promise((resolve) => setTimeout(resolve, 120));
-			if (context.state.subagentResultAnimationTimer) clearInterval(context.state.subagentResultAnimationTimer);
-			if (context.state.subagentResultAnimationTimer !== undefined) throw new Error("legacy timer was not cleared");
+			});
+			let invalidations = 0;
+			const context = { state: {}, invalidate() { invalidations += 1; } };
+			const firstGlyph = glyphOf(registeredTool.renderResult(resultFor("running"), { expanded: false }, theme, context));
+			if (invalidations !== 0) throw new Error("rendering invalidated the card before the first tick");
+			if (context.state.subagentResultAnimationTimer === undefined) throw new Error("running result did not start an animation timer");
+			await sleep(220);
+			if (invalidations < 1) throw new Error("running result never invalidated its card");
+			if ((context.state.subagentResultAnimationFrame ?? 0) < 1) throw new Error("animation frame did not advance");
+			const nextGlyph = glyphOf(registeredTool.renderResult(resultFor("running"), { expanded: false }, theme, context));
+			if (nextGlyph === firstGlyph) throw new Error("running glyph did not advance with the animation frame: " + firstGlyph);
+			registeredTool.renderResult(resultFor("complete"), { expanded: false }, theme, context);
+			if (context.state.subagentResultAnimationTimer !== undefined) throw new Error("settled result kept its animation timer");
+			const settledInvalidations = invalidations;
+			await sleep(220);
+			if (invalidations !== settledInvalidations) throw new Error("settled result kept animating");
+			const launchContext = { state: {}, invalidate() {} };
+			registeredTool.renderResult({
+				content: [{ type: "text", text: "started" }],
+				details: { mode: "single", results: [], asyncId: "run-1", asyncDir: "/tmp/run-1" },
+			}, { expanded: false }, theme, launchContext);
+			if (launchContext.state.subagentResultAnimationTimer !== undefined) throw new Error("background launch started an animation timer");
+			let legacyTicks = 0;
+			const legacyContext = {
+				state: { subagentResultAnimationTimer: setInterval(() => { legacyTicks += 1; }, 10) },
+				invalidate() {},
+			};
+			registeredTool.renderResult(resultFor("complete"), { expanded: false }, theme, legacyContext);
+			await sleep(60);
+			if (legacyContext.state.subagentResultAnimationTimer !== undefined) throw new Error("legacy timer was not cleared");
 			if (legacyTicks !== 0) throw new Error("legacy timer ticked " + legacyTicks + " times");
-			if (invalidations !== 0) throw new Error("foreground result invalidated " + invalidations + " times");
 		`;
 
 		execFileSync(

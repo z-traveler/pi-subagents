@@ -30,7 +30,7 @@ import { getAgentDir } from "../shared/utils.ts";
 import { isStaleExtensionContextError, withCachedUiContext } from "../shared/extension-context.ts";
 import { currentCompletionOwnerId } from "../shared/completion-owner.ts";
 import { cleanupOldChainDirs } from "../shared/settings.ts";
-import { clearLegacyResultAnimationTimer, renderSubagentResult, renderSubagentSummary, setInlineWorkflowCoverage } from "../tui/render.ts";
+import { clearLegacyResultAnimationTimer, detailsHaveRunningResult, renderSubagentResult, renderSubagentSummary, setInlineWorkflowCoverage } from "../tui/render.ts";
 import { openSubagentFleet } from "../tui/fleet.ts";
 import { createBuiltinInspectorPlugins } from "../inspectors/plugins.ts";
 import { SubagentFleetStatus, resolveFleetViewPlacement } from "../tui/fleet-status.ts";
@@ -309,6 +309,45 @@ function getSubagentSessionRoot(parentSessionFile: string | null): string {
 
 function expandTilde(p: string): string {
 	return p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
+}
+
+// Running result cards repaint only when the child reports progress, which can be
+// a second or more apart, so a glyph derived from that progress alone reads as a
+// stalled spinner. Advance a frame of its own while a running card is mounted.
+const RESULT_ANIMATION_INTERVAL_MS = 125;
+
+interface ResultAnimationState {
+	subagentResultAnimationTimer?: ReturnType<typeof setInterval>;
+	subagentResultAnimationFrame?: number;
+}
+
+const activeResultAnimations = new Set<ResultAnimationState>();
+
+function ensureResultAnimation(state: ResultAnimationState, invalidate: (() => void) | undefined): number {
+	if (state.subagentResultAnimationTimer === undefined && typeof invalidate === "function") {
+		state.subagentResultAnimationFrame ??= 0;
+		const timer = setInterval(() => {
+			state.subagentResultAnimationFrame = (state.subagentResultAnimationFrame ?? 0) + 1;
+			try {
+				invalidate();
+			} catch {
+				// A card that unmounted mid-tick must not break the animation loop.
+			}
+		}, RESULT_ANIMATION_INTERVAL_MS);
+		timer.unref?.();
+		state.subagentResultAnimationTimer = timer;
+		activeResultAnimations.add(state);
+	}
+	return state.subagentResultAnimationFrame ?? 0;
+}
+
+function stopResultAnimation(state: ResultAnimationState): void {
+	clearLegacyResultAnimationTimer({ state });
+	activeResultAnimations.delete(state);
+}
+
+function stopActiveResultAnimations(): void {
+	for (const state of [...activeResultAnimations]) stopResultAnimation(state);
 }
 
 function isSlashResultRunning(result: { details?: Details }): boolean {
@@ -836,11 +875,18 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		},
 
 		renderResult(result, options, theme, context) {
-			clearLegacyResultAnimationTimer(context);
 			const renderedResult = { ...result, isError: context.isError };
+			// The summary layout paints a static marker, and background launches carry no
+			// running result row, so neither needs an animation timer.
+			const animate = !summaryInlineToolDisplay
+				&& renderedResult.details !== undefined
+				&& detailsHaveRunningResult(renderedResult.details);
+			const state = context.state as ResultAnimationState;
+			if (!animate) stopResultAnimation(state);
+			const frame = animate ? ensureResultAnimation(state, context.invalidate) : undefined;
 			return summaryInlineToolDisplay
 				? renderSubagentSummary(renderedResult, options, theme)
-				: renderSubagentResult(renderedResult, options, theme, undefined, config.mainWindowRenderer, config.foregroundDetachShortcut);
+				: renderSubagentResult(renderedResult, options, theme, frame, config.mainWindowRenderer, config.foregroundDetachShortcut);
 		},
 
 	};
@@ -1209,6 +1255,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
+		stopActiveResultAnimations();
 		runtimeEntry.cleanup();
 		try {
 			await disposeChildSessions();

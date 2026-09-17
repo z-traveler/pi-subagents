@@ -15,7 +15,7 @@ import {
 	SUBAGENT_CONTROL_EVENT,
 	SUBAGENT_CONTROL_INTERCOM_EVENT,
 	SUBAGENT_STEERING_NOTICE_EVENT,
-	WIDGET_ANIMATION_INTERVAL_MS,
+	WIDGET_ANIMATION_TICK_MS,
 } from "../../shared/types.ts";
 import { readStatus, resolveWatchPath } from "../../shared/utils.ts";
 import { normalizeParallelGroups } from "./parallel-groups.ts";
@@ -100,7 +100,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 	};
 	let rootWatcher: fs.FSWatcher | undefined;
 	let nextLivenessAt = Date.now() + livenessIntervalMs;
-	let nextWidgetAnimationAt = Date.now() + WIDGET_ANIMATION_INTERVAL_MS;
+	let nextWidgetAnimationAt = Date.now() + WIDGET_ANIMATION_TICK_MS;
 	const watch = options.watch ?? fs.watch;
 	const useNativeWatcher = () => shouldUseNativeFsWatch("async-job-tracker", options.platform);
 	const withLastUiContext = <T>(run: (ctx: ExtensionContext) => T): T | undefined => {
@@ -676,10 +676,10 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 				if (widgetChanged) rerenderLastWidget();
 			}
 			if (runningJobIds.size > 0 && now >= nextWidgetAnimationAt) {
-				nextWidgetAnimationAt = now + WIDGET_ANIMATION_INTERVAL_MS;
+				nextWidgetAnimationAt = now + WIDGET_ANIMATION_TICK_MS;
 				requestLastWidgetRender();
 			}
-		}, Math.min(WIDGET_ANIMATION_INTERVAL_MS, livenessIntervalMs));
+		}, Math.min(WIDGET_ANIMATION_TICK_MS, livenessIntervalMs));
 		state.poller.unref?.();
 	};
 
