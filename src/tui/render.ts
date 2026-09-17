@@ -22,7 +22,7 @@ import {
 	type WorkflowNodeStatus,
 	type MainWindowRendererConfig,
 	MAX_WIDGET_JOBS,
-	WIDGET_ANIMATION_INTERVAL_MS,
+	WIDGET_ANIMATION_FRAME_MS,
 	WIDGET_KEY,
 } from "../shared/types.ts";
 import { previewDisplayText, sanitizeDisplayText, truncateDisplayText } from "../shared/display-text.ts";
@@ -920,7 +920,9 @@ function isResultRunning(result: Details["results"][number], status = result.pro
 	return status === "running" && !hasTerminalResultFlag(result);
 }
 
-function detailsHaveRunningResult(details: Details): boolean {
+/** Whether a result card paints a live running glyph, and therefore depends on
+ *  the caller-supplied animation frame to keep that glyph moving. */
+export function detailsHaveRunningResult(details: Details): boolean {
 	return details.progress?.some((progress) => {
 		if (progress.status !== "running") return false;
 		const result = details.results.find((entry) => entry.progress?.index === progress.index) ?? details.results[progress.index];
@@ -2837,7 +2839,7 @@ function buildWidgetComponent(jobs: AsyncJobState[], ui: ExtensionContext["ui"])
 		});
 		container.render = (renderWidth: number): string[] => {
 			const now = Date.now();
-			const frame = Math.floor(now / WIDGET_ANIMATION_INTERVAL_MS);
+			const frame = Math.floor(now / WIDGET_ANIMATION_FRAME_MS);
 			const expanded = ui.getToolsExpanded?.() ?? false;
 			const coverage = inlineWorkflowCoverage.get(ui);
 			const covered = new Set<string>();

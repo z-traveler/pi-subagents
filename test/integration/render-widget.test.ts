@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { extractToolArgsPreview } from "../../src/shared/utils.ts";
+import { WIDGET_ANIMATION_FRAME_MS, WIDGET_ANIMATION_TICK_MS } from "../../src/shared/types.ts";
 
 const { buildWidgetLines, clearLegacyResultAnimationTimer, compactTaskText, projectAsyncLane, renderWidget, widgetRenderKey } = await import("../../src/tui/render.ts") as {
 	buildWidgetLines: (jobs: Array<Record<string, unknown>>, theme: { fg(name: string, text: string): string; bold(text: string): string }, width?: number, expanded?: boolean, frame?: number) => string[];
@@ -2218,6 +2219,31 @@ describe("subagent async widget rendering", () => {
 				firstRunningGlyph(first.find((line) => line.includes("reviewer · running")) ?? ""),
 				firstRunningGlyph(second.find((line) => line.includes("reviewer · running")) ?? ""),
 				"step glyph should advance",
+			);
+		} finally {
+			Date.now = originalNow;
+			renderWidget(createUiContext().ctx as never, []);
+		}
+	});
+
+	it("advances running widget glyphs on every repaint tick", () => {
+		const originalNow = Date.now;
+		try {
+			Date.now = () => 1_000;
+			const ui = createUiContext();
+			renderWidget(ui.ctx as never, [{ asyncId: "run-tick", asyncDir: "/tmp/run", status: "running", agents: ["scout"], updatedAt: 1_000 }]);
+			const component = (ui.widgets.at(-1) as (_tui: unknown, widgetTheme: typeof theme) => { render(width: number): string[] })(undefined, theme);
+			const first = component.render(180);
+
+			Date.now = () => 1_000 + WIDGET_ANIMATION_FRAME_MS - 1;
+			assert.deepEqual(component.render(180), first, "a render inside the same animation frame must reuse the cached lines");
+
+			Date.now = () => 1_000 + WIDGET_ANIMATION_TICK_MS;
+			const ticked = component.render(180);
+			assert.notEqual(
+				firstRunningGlyph(ticked.join("\n")),
+				firstRunningGlyph(first.join("\n")),
+				"every repaint tick must advance the running glyph",
 			);
 		} finally {
 			Date.now = originalNow;
