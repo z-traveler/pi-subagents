@@ -30,6 +30,11 @@
 - Some MCP clients, such as pi-claude-bridge, send `workflow: true` as the string `"true"`. The `subagent` tool then looked for a workflow resource named `true` and failed with an error telling the caller to use `workflow: true`, which it already had, so retrying could not help. `workflow: "true"` now runs and validates the reply's ```` ```js workflow ```` block exactly like `workflow: true` (#2600).
 - Async runs now reach `run-history.jsonl`. `recordRun()` was only called by the foreground executor, so with `asyncByDefault` every subagent launch was invisible to `loadRunsForAgent()` census tooling (on a live machine the file stayed frozen at its last foreground entry while 140 async launches went unrecorded in a single day). The background runner now records at terminal publication: single-step runs keep the exact foreground shape, multi-step runs record one row per child step so per-agent lookups see every child, and paused runs record as `interrupted` with a later resume recording again — one entry per attempt. Thanks to [@limin411](https://github.com/limin411) for [#2620](https://github.com/nicobailon/pi-subagents/pull/2620).
 - `/subagent-cost` and the RPC `cost` method now count every round of a resumed foreground workflow child. Each round appends to the same child session file, and its tool result carried no run id, so every round after the first was dropped as a duplicate and the totals came out low without any warning. Foreground workflow results now include the child's run id, the same id that workflow receipts use. Results recorded before this fix still lack it. Thanks to [@chagwood](https://github.com/chagwood) for [#2601](https://github.com/nicobailon/pi-subagents/issues/2601).
+
+### Changed
+- Completed foreground results print a `Revive:` line naming the run id, matching `status` and Intercom result cards, so a foreground child can be resumed without guessing its id.
+- `resume` and `status` now report that a mission id is not a run id when one is passed where a run id is required.
+
 ## [0.74.0] - 2026-09-30
 
 ### Highlights
