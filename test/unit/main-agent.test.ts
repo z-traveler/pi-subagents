@@ -70,7 +70,7 @@ aliases: lead
 model: cliproxy/gpt-test
 thinking: high
 tools: read, subagent
-systemPromptMode: append
+systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: true
 ---
@@ -129,7 +129,7 @@ Coordinate the work and verify the result.
 			const result = await handler({ systemPrompt: prompt }, ctx) as { systemPrompt?: string } | undefined;
 			if (result?.systemPrompt) prompt = result.systemPrompt;
 		}
-		assert.equal(prompt, "Pi base prompt with project instructions and skills.\n\nCoordinate the work and verify the result.");
+		assert.equal(prompt, "Coordinate the work and verify the result.");
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
@@ -176,6 +176,80 @@ test("rejects an unknown named main agent before applying configuration", async 
 		assert.deepEqual(handlers.get("input")?.[0]?.({}, ctx), { action: "handled" });
 	} finally {
 		fs.rmSync(ctx.cwd, { recursive: true, force: true });
+	}
+});
+
+test("rejects an invalid higher-priority definition instead of falling back to a lower-priority agent", async () => {
+	const { registerNamedMainAgent } = await import("../../src/extension/main-agent.ts");
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-main-agent-user-"));
+	const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-main-agent-project-invalid-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	try {
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		fs.mkdirSync(path.join(agentDir, "agents"), { recursive: true });
+		fs.mkdirSync(path.join(projectDir, ".pi", "agents"), { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "agents", "leader.md"), `---
+name: leader
+description: Valid user leader
+---
+
+User leader prompt.
+`, "utf-8");
+		const invalidAgentPath = path.join(projectDir, ".pi", "agents", "leader.md");
+		fs.writeFileSync(invalidAgentPath, `---
+name: leader
+description: Invalid project leader
+runner:
+  type: unknown
+---
+
+Project leader prompt.
+`, "utf-8");
+
+		const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+		let configurationApplied = false;
+		let shutdownRequested = false;
+		const pi = {
+			registerFlag() {},
+			getFlag(name: string) { return name === "agent" ? "leader" : undefined; },
+			on(name: string, handler: (event: unknown, ctx: unknown) => unknown) {
+				const current = handlers.get(name) ?? [];
+				current.push(handler);
+				handlers.set(name, current);
+			},
+			setModel() { configurationApplied = true; },
+			setThinkingLevel() { configurationApplied = true; },
+			setActiveTools() { configurationApplied = true; },
+			appendEntry() { configurationApplied = true; },
+		};
+		const ctx = {
+			cwd: projectDir,
+			hasUI: true,
+			shutdown() { shutdownRequested = true; },
+			modelRegistry: { getAvailable() { return []; }, find() { return undefined; } },
+			sessionManager: { getEntries() { return []; } },
+		};
+
+		registerNamedMainAgent(pi as never);
+		const start = handlers.get("session_start")?.[0];
+		assert.ok(start);
+		await assert.rejects(
+			() => start({ reason: "startup" }, ctx),
+			(error: unknown) => {
+				assert.ok(error instanceof Error);
+				assert.match(error.message, /Main agent 'leader' has invalid configuration/);
+				assert.ok(error.message.includes(invalidAgentPath));
+				assert.match(error.message, /runner\.type/);
+				return true;
+			},
+		);
+		assert.equal(configurationApplied, false);
+		assert.equal(shutdownRequested, true);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		fs.rmSync(agentDir, { recursive: true, force: true });
+		fs.rmSync(projectDir, { recursive: true, force: true });
 	}
 });
 
@@ -555,7 +629,7 @@ Leader prompt.
 	}
 });
 
-test("does not propagate the named main-agent prompt into a different subagent", () => {
+test("defaults omitted prompt mode to append only for named main agents", () => {
 	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-main-agent-child-"));
 	const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-main-agent-project-"));
 	try {
@@ -564,7 +638,6 @@ test("does not propagate the named main-agent prompt into a different subagent",
 name: leader
 description: Coordinates work
 tools: read, subagent
-systemPromptMode: replace
 ---
 
 LEADER_ONLY_PROMPT_MARKER
@@ -573,7 +646,6 @@ LEADER_ONLY_PROMPT_MARKER
 name: worker
 description: Performs focused work
 tools: read
-systemPromptMode: replace
 completionGuard: false
 ---
 
@@ -631,6 +703,7 @@ WORKER_ONLY_PROMPT_MARKER
 					const result = await handler({ systemPrompt: parentPrompt }, ctx);
 					if (result?.systemPrompt) parentPrompt = result.systemPrompt;
 				}
+				assert.match(parentPrompt, /Pi base prompt\./);
 				assert.match(parentPrompt, /LEADER_ONLY_PROMPT_MARKER/);
 				assert.ok(subagentTool, "subagent tool was not registered");
 				const result = await subagentTool.execute(
@@ -643,7 +716,9 @@ WORKER_ONLY_PROMPT_MARKER
 				assert.notEqual(result.isError, true, JSON.stringify(result.content));
 				assert.equal(mockPi.sessions.length, 1);
 				const launch = mockPi.sessions[0].launch;
-				const childPrompt = launch.systemPrompt ?? launch.appendSystemPrompt ?? "";
+				assert.equal(launch.appendSystemPrompt, undefined);
+				assert.ok(launch.systemPrompt, "ordinary subagent should retain its replace default");
+				const childPrompt = launch.systemPrompt;
 				assert.match(childPrompt, /WORKER_ONLY_PROMPT_MARKER/);
 				assert.doesNotMatch(childPrompt, /LEADER_ONLY_PROMPT_MARKER/);
 			} finally {
