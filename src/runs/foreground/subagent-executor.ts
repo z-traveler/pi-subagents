@@ -76,6 +76,7 @@ import { assertJsonSchemaObject, cleanupStructuredOutputRuntime, createStructure
 import { compactForegroundDetails, getSingleResultOutput, readStatus, resolveChildCwd, sumResultsCost, sumResultsUsage, toAgentToolUsage } from "../../shared/utils.ts";
 import { discardPreservedWorktrees, formatParallelHandoffError, formatParallelHandoffReference, formatStoredParallelHandoffCleanup, parallelHandoffPath, readParallelHandoffManifest, recordParallelHandoffMerge, recordParallelHandoffSupersession, writeParallelHandoffGroup, writeWorktreeSetupHandoff } from "../shared/parallel-handoff.ts";
 import { summarizeContextModes, type ContextMode, type ContextSummary } from "../shared/context-mode.ts";
+import { annotateResumeGuidance } from "../shared/resume-guidance.ts";
 import {
 	attachNestedChildrenToResultChildren,
 	buildSubagentResultIntercomPayload,
@@ -7312,9 +7313,11 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			requestSessionId,
 			requestedSpawns,
 		);
+		const attachResumeGuidance = (result: AgentToolResult<Details>): AgentToolResult<Details> =>
+			annotateResumeGuidance(attachMission(result), { delegated: delegatedExecution });
 		if (reservation.error) {
 			activeAsyncCapacity?.rollback();
-			return attachMission(spawnBudgetErrorResult(reservation.error, foregroundMode));
+			return attachResumeGuidance(spawnBudgetErrorResult(reservation.error, foregroundMode));
 		}
 
 		const execData: ExecutionContextData = omitUndefinedProperties({
@@ -7543,7 +7546,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			const asyncResult = await runAsyncPath(execData, deps);
 			if (asyncResult) {
 				asyncLaunchFailed = asyncResult.isError === true;
-				return attachMission(withRunFanoutBudget(withResolvedContext(asyncResult, contextPolicy.contextSummary), runFanoutBudget));
+				return attachResumeGuidance(withRunFanoutBudget(withResolvedContext(asyncResult, contextPolicy.contextSummary), runFanoutBudget));
 			}
 			if (foregroundControl) {
 				writeNestedForegroundEvent("subagent.nested.started");
@@ -7553,13 +7556,13 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			if (hasSingle) {
 				const result = await runSinglePath(execData, deps);
 				writeNestedForegroundEvent("subagent.nested.completed", result);
-				return attachMission(withRunFanoutBudget(withResolvedContext(result, contextPolicy.contextSummary), runFanoutBudget, { annotateContent: runFanoutAnnotateContent }));
+				return attachResumeGuidance(withRunFanoutBudget(withResolvedContext(result, contextPolicy.contextSummary), runFanoutBudget, { annotateContent: runFanoutAnnotateContent }));
 			}
 		} catch (error) {
 			asyncLaunchFailed = effectiveAsync;
 			const errorResult = toExecutionErrorResult(effectiveParams, error, contextPolicy.contextSummary);
 			if (nestedForegroundStarted) writeNestedForegroundEvent("subagent.nested.completed", errorResult);
-			return attachMission(errorResult);
+			return attachResumeGuidance(errorResult);
 		} finally {
 			if (effectiveAsync && (asyncLaunchFailed || (activeAsyncCapacity && !activeAsyncCapacity.owner.runnerStartedAt))) deps.state.liveAsyncSessionRoots?.delete(asyncRunId);
 			if (activeAsyncCapacity && !activeAsyncCapacity.owner.runnerStartedAt) activeAsyncCapacity.rollback();

@@ -18,6 +18,7 @@ import { resolveSubagentResultStatus } from "../../intercom/result-intercom.ts";
 import { readProcessTerminal, sanitizeProcessTerminal } from "./process-terminal.ts";
 import { formatWaitSubscriptions } from "./wait-subscriptions.ts";
 import { resolveAsyncRunLocation } from "./async-resume.ts";
+import { asyncRunNotFoundMessage, formatResumeGuidance, hasExistingSessionFile } from "../shared/resume-guidance.ts";
 import { resolveSubagentRunId } from "./run-id-resolver.ts";
 import { flatToLogicalStepIndex, normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
@@ -117,36 +118,6 @@ interface RunStatusDeps {
 	sessionRoots?: string[];
 	activeCapacityRoot?: string;
 	abandonedSlotReleaseAfterMs?: number | false;
-}
-
-function hasExistingSessionFile(value: unknown): value is string {
-	return typeof value === "string" && fs.existsSync(value);
-}
-
-function formatResumeGuidance(runId: string | undefined, children: Array<{ agent?: unknown; sessionFile?: unknown; runId?: unknown; workflowKey?: unknown; status?: unknown; activityState?: unknown }>, fallbackSessionFile?: unknown, options: { stopped?: boolean } = {}): string {
-	if (options.stopped) return "Resume: unavailable; stopped runs are not resumable. Start a new run instead.";
-	const knownChildren = children
-		.map((child, index) => ({ child, index }))
-		.filter(({ child }) => typeof child.agent === "string");
-	if (!runId || knownChildren.length === 0) return "Resume: unavailable; no child session file was persisted.";
-	const workflowChildren = knownChildren.filter(({ child }) => typeof child.runId === "string" && child.runId.trim() && hasExistingSessionFile(child.sessionFile));
-	const supervisorDetachedWorkflowChildren = workflowChildren.filter(({ child }) => child.status === "paused" && child.activityState === "needs_attention");
-	const resumableWorkflowChildren = workflowChildren.filter(({ child }) => !(child.status === "paused" && child.activityState === "needs_attention"));
-	if (workflowChildren.length > 0) {
-		return [
-			...supervisorDetachedWorkflowChildren.map(({ child }) => `Recovery workflow child${typeof child.workflowKey === "string" && child.workflowKey.trim() ? ` '${child.workflowKey}'` : ""}: reply to the supervisor request first, then wait with bg_wait({ id: "${child.runId}" }). Use subagent({ action: "status", id: "${child.runId}" }) to recover the result; do not resume or launch a replacement while it remains detached.`),
-			...resumableWorkflowChildren.map(({ child }) => `Revive workflow child${typeof child.workflowKey === "string" && child.workflowKey.trim() ? ` '${child.workflowKey}'` : ""}: subagent({ action: "resume", id: "${child.runId}", message: "..." })`),
-		].join("\n");
-	}
-	const singleSessionFile = knownChildren[0]?.child.sessionFile ?? fallbackSessionFile;
-	if (children.length === 1 && knownChildren.length === 1 && hasExistingSessionFile(singleSessionFile)) {
-		return `Revive: subagent({ action: "resume", id: "${runId}", message: "..." })`;
-	}
-	const childWithSession = knownChildren.find(({ child }) => hasExistingSessionFile(child.sessionFile));
-	if (childWithSession) {
-		return `Revive child: subagent({ action: "resume", id: "${runId}", index: ${childWithSession.index}, message: "..." })`;
-	}
-	return "Resume: unavailable; no child session file was persisted.";
 }
 
 function stepLineLabel(status: AsyncStatus, index: number): string {
@@ -462,7 +433,7 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 
 	if (!asyncDir && !resultPath) {
 		return {
-			content: [{ type: "text", text: "Async run not found. Provide id or dir." }],
+			content: [{ type: "text", text: asyncRunNotFoundMessage(params.id ?? params.runId) }],
 			isError: true,
 			details: { mode: "single", results: [] },
 		};
