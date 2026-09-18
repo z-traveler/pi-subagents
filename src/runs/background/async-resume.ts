@@ -19,6 +19,7 @@ import { intersectThinkingCeilings, parseThinkingLevel, type ThinkingLevel } fro
 import { assertWorkflowGraphHostSteps } from "../shared/host-step-status.ts";
 import { validateIntercomBridgeConfig } from "../../intercom/intercom-bridge.ts";
 import { validateModelResponseAliases } from "../../shared/model-response-aliases.ts";
+import { asyncRunNotFoundMessage } from "../shared/resume-guidance.ts";
 
 export interface AsyncResumeParams {
 	id?: string;
@@ -494,8 +495,7 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 	const requireSessionFile = options.requireSessionFile ?? true;
 	const location = resolveAsyncRunLocation(params, asyncDirRoot, resultsDir);
 	if (!location.asyncDir && !location.resultPath) {
-		const requested = params.id ?? params.runId;
-		throw new Error(requested ? `Async run not found for '${requested}'.` : "Async run not found. Provide id or dir.");
+		throw new Error(asyncRunNotFoundMessage(params.id ?? params.runId));
 	}
 
 	const reconciliation = location.asyncDir

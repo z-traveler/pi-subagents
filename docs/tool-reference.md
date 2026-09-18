@@ -381,6 +381,7 @@ Commands remain owned by the child session. Normal completion with unfinished co
 - Revive starts a new child session from the old session context; it does not resume the live session, and it requires the chosen child to have a persisted `.jsonl` session file.
 - Direct revival takes an exclusive cross-process lease on the canonical session file until the new child finishes. A concurrent attempt fails before Pi is spawned and identifies the owning revived run; dead-owner leases are reclaimed only when staleness can be proved.
 - Without `message` (and without `index` or `chain`), `resume` on a top-level async workflow run that stopped because its session was replaced or its Pi process exited (`workflow.stopCause: "runtime-replaced"` or `"owner-exited"`) relaunches it once from the launch it saved, reusing its finished children, and its receipt starts with `Resumed workflow '<id>' as <new id>.`; a run that cannot be resumed is refused as `Cannot resume workflow '<id>': <reason>.` The session that owns the run also resumes it on its own when reopened or reloaded, unless [`autoResume`](configuration.md#autoresume) is off; see [Workflows](workflows.md).
+- Run ids come from a launch result (`Async: <agent> [<id>]`), a completion card, a `children.list` row, a completed foreground result's `Revive:` line, or `status`. A mission id is not a run id.
 
 ### stop
 
