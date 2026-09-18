@@ -111,6 +111,21 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(output, "Hello from mock agent");
 	});
 
+	it("names the revive call for a completed foreground run", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Hello from mock agent" });
+		const executor = makeExecutor([makeAgent("echo")]);
+		const result = await executor.execute("revive-hint", { agent: "echo", task: "Say hello", async: false }, new AbortController().signal, undefined, makeMinimalCtx(tempDir));
+
+		assert.equal(result.isError, undefined, result.content[0]?.text);
+		const runId = result.details.runId;
+		assert.ok(runId, "a foreground run reports the id its resume call needs");
+		const sessionFile = result.details.results[0]?.sessionFile;
+		assert.equal(typeof sessionFile, "string");
+		assert.equal(fs.existsSync(sessionFile ?? ""), true, "the hint is only useful when the child session was persisted");
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		assert.equal(text.split("\n").includes(`Revive: subagent({ action: "resume", id: "${runId}", message: "..." })`), true, text);
+	});
+
 	it("derives a child session name and passes it to the child runtime config", async () => {
 		mockPi.onCall({ output: "hello" });
 		const agents = makeAgentConfigs(["echo"]);

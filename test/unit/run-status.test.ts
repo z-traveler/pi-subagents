@@ -7,6 +7,8 @@ import { EXTERNAL_JOB_PROVIDER_REGISTRY_KEY, registerExternalJobProvider } from 
 import { updateActiveRunIndex } from "../../src/runs/background/active-run-index.ts";
 import { formatAsyncResultTranscript } from "../../src/runs/background/fleet-view.ts";
 import { inspectSubagentStatus } from "../../src/runs/background/run-status.ts";
+import { resolveAsyncResumeTarget } from "../../src/runs/background/async-resume.ts";
+import { getAgentDir } from "../../src/shared/utils.ts";
 import { createNestedRoute, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
 import { claimRunFanoutBatch, createRunFanoutBudget, writeRunFanoutBudgetDescriptor } from "../../src/runs/shared/run-fanout-budget.ts";
 import { TEMP_ROOT_DIR, type SubagentState } from "../../src/shared/types.ts";
@@ -271,6 +273,27 @@ describe("async run status inspection", () => {
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 			if (budgetDirectory) fs.rmSync(budgetDirectory, { recursive: true, force: true });
+		}
+	});
+
+	it("explains a mission id passed where a run id is required", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-run-status-mission-id-"));
+		try {
+			const asyncDirRoot = path.join(root, "runs");
+			const resultsDir = path.join(root, "results");
+			const missionId = "35b46c3d-7a7e-4d84-bb9e-9754f0b1ee09";
+			const missionDir = path.join(getAgentDir(), "missions", "projects", "project-key");
+			fs.mkdirSync(missionDir, { recursive: true });
+			fs.writeFileSync(path.join(missionDir, `${missionId}.json`), "{}", "utf-8");
+
+			const result = inspectSubagentStatus({ id: missionId }, { asyncDirRoot, resultsDir });
+
+			assert.equal(result.isError, true);
+			const text = textContent(result);
+			assert.match(text, /is a mission id, not a run id/);
+			assert.throws(() => resolveAsyncResumeTarget({ id: missionId }, { asyncDirRoot, resultsDir }), /is a mission id, not a run id/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 
