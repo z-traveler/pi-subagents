@@ -39,9 +39,9 @@ An agent definition can also configure the interactive main session:
 pi --agent leader
 ```
 
-The flag uses normal agent discovery, precedence, and aliases. The selected agent remains available to the `subagent` tool, and its name is restored with the session on `/resume` or `/reload`.
+The flag uses normal agent discovery, precedence, and aliases. If the requested name has an invalid definition with higher precedence than the selected valid definition, startup fails with that diagnostic instead of silently falling back. The selected agent remains available to the `subagent` tool, and its name is restored with the session on `/resume` or `/reload`.
 
-For the main session, the definition applies `model`, `thinking`, `tools`, `mcpDirectTools`, `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, `skills`, `skillPath`, and `memory`. Child-only launch controls such as `async`, `timeoutMs`, `turnBudget`, `acceptance`, `output`, and `subagentOnlyExtensions` still apply only when the agent runs as a subagent.
+For the main session, the definition applies `model`, `thinking`, `tools`, `mcpDirectTools`, `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, `skills`, `skillPath`, and `memory`. When `systemPromptMode` is omitted, a named main agent appends its prompt to Pi's base prompt; ordinary subagent launches retain their `replace` default. An explicit `append` or `replace` applies in either role. Child-only launch controls such as `async`, `timeoutMs`, `turnBudget`, `acceptance`, `output`, and `subagentOnlyExtensions` still apply only when the agent runs as a subagent.
 
 ## Builtin agents
 
@@ -338,7 +338,7 @@ Field notes:
 | `modelClass` | Semantic named pool resolved from `subagents.modelPools`; may coexist with concrete frontmatter defaults for portability. |
 | `fallbackModels` | Legacy ordered concrete backups. Named class pools use the same failure classifier and effect-safety rules; the native read-only HTTP 429 continuation rules still apply. See [supported configuration and compatibility limits](models.md#native-read-only-continuation-after-http-429). |
 | `thinking` | Appended as a `:level` suffix at runtime unless a suffix is already present. |
-| `systemPromptMode` | `replace` by default; `append` keeps Pi's base prompt. |
+| `systemPromptMode` | Ordinary subagent launches default to `replace`; named main agents selected with `--agent` default to `append`. An explicit value applies in either role. |
 | `inheritProjectContext` | Keeps or strips inherited repository instruction blocks. |
 | `inheritGlobalContext` | Keeps or strips the operator's global context file from the Pi config agent directory (e.g. `~/.pi/agent/AGENTS.md`). It has an effect only when `inheritProjectContext` is `true`; otherwise all context files are already disabled. Defaults to `false`. |
 | `inheritSkills` | Keeps or strips Pi's discovered skills catalog. |
