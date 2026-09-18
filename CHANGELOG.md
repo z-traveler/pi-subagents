@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+
+### Changed
+- Completed foreground results print a `Revive:` line naming the run id, matching `status` and Intercom result cards, so a foreground child can be resumed without guessing its id.
+- `resume` and `status` now report that a mission id is not a run id when one is passed where a run id is required.
+
 ## [0.74.0] - 2026-09-30
 
 ### Highlights
