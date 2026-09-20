@@ -216,11 +216,6 @@ interface SubagentSettings {
 const EMPTY_SUBAGENT_SETTINGS: SubagentSettings = { overrides: {}, providerOverrides: {} };
 const agentFrontmatterFields = new WeakMap<AgentConfig, Set<string>>();
 
-export function hasExplicitSystemPromptMode(agent: AgentConfig): boolean {
-	return agentFrontmatterFields.get(agent)?.has("systemPromptMode") === true
-		|| agent.override?.fields?.includes("systemPromptMode") === true;
-}
-
 export interface ChainStepConfig {
 	agent?: string;
 	task?: string;
