@@ -629,7 +629,7 @@ Leader prompt.
 	}
 });
 
-test("defaults omitted prompt mode to append only for named main agents", () => {
+test("uses the resolved replace default for omitted prompt mode in both main-agent and subagent roles", () => {
 	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-main-agent-child-"));
 	const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-main-agent-project-"));
 	try {
@@ -703,7 +703,7 @@ WORKER_ONLY_PROMPT_MARKER
 					const result = await handler({ systemPrompt: parentPrompt }, ctx);
 					if (result?.systemPrompt) parentPrompt = result.systemPrompt;
 				}
-				assert.match(parentPrompt, /Pi base prompt\./);
+				assert.doesNotMatch(parentPrompt, /Pi base prompt\./);
 				assert.match(parentPrompt, /LEADER_ONLY_PROMPT_MARKER/);
 				assert.ok(subagentTool, "subagent tool was not registered");
 				const result = await subagentTool.execute(
