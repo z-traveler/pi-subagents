@@ -9,6 +9,7 @@ import { createModelPerformanceCacheKey, ModelPerformanceStore } from "../../src
 import { MODEL_PERFORMANCE_PROBE_MAX_ESTIMATED_TOKENS } from "../../src/runs/shared/model-performance-probe.ts";
 import { clearExclusions, getExcludedCount } from "../../src/runs/shared/model-exclusions.ts";
 import type { RunnerSubagentStep } from "../../src/runs/shared/parallel-utils.ts";
+import type { UsageBudgetConfig } from "../../src/shared/types.ts";
 
 const performanceConfig = {
 	firstTokenTimeoutMs: 45_000,
@@ -43,6 +44,8 @@ async function run(stepConfig: RunnerSubagentStep, options: {
 	onAttemptStart?: (attempt: { model?: string }) => void;
 	onModelPerformanceProbe?: (notice: { message: string }) => void;
 	awaitBackgroundTasks?: boolean;
+	usageBudget?: UsageBudgetConfig;
+	usageBudgetExhausted?: () => boolean | undefined;
 } = {}): Promise<{
 	launched: string[];
 	log: string;
@@ -105,6 +108,8 @@ async function run(stepConfig: RunnerSubagentStep, options: {
 			onAttemptStart: options.onAttemptStart,
 			onModelPerformanceProbe: options.onModelPerformanceProbe,
 			registerBackgroundTask: (task) => backgroundTasks.push(task),
+			usageBudget: options.usageBudget,
+			usageBudgetExhausted: options.usageBudgetExhausted,
 		});
 		if (options.awaitBackgroundTasks !== false) await Promise.all(backgroundTasks);
 		const eventsPath = path.join(cwd, "events.jsonl");
@@ -420,7 +425,7 @@ describe("background model performance selection", () => {
 		assert.equal(getExcludedCount(), 0);
 	});
 
-	it("retries a hard-stalled incomplete response in the same child session", { timeout: 2_000 }, async () => {
+	it("retries a hard-stalled incomplete response without resetting its tool budget", { timeout: 2_000 }, async () => {
 		const candidates = ["gateway/hard-slow", "gateway/hard-fast"];
 		let creations = 0;
 		const retries: string[] = [];
@@ -438,8 +443,21 @@ describe("background model performance selection", () => {
 				return {
 					subscribe(next) { listener = next; return () => { listener = undefined; }; },
 					async prompt() {
-						initialPending = true;
 						emit({ type: "agent_start" });
+						emit({ type: "turn_start" });
+						const toolCall = {
+							role: "assistant", content: [{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "README.md" } }],
+							model: activeModel, stopReason: "toolUse",
+							usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+						};
+						const toolResult = { role: "toolResult", toolCallId: "read-1", toolName: "read", content: [{ type: "text", text: "retained tool result" }] };
+						messages.push(toolCall, toolResult);
+						emit({ type: "message_end", message: toolCall });
+						emit({ type: "tool_execution_start", toolCallId: "read-1", toolName: "read", args: { path: "README.md" } });
+						emit({ type: "tool_result_end", toolCallId: "read-1", toolName: "read", message: toolResult });
+						emit({ type: "tool_execution_end", toolCallId: "read-1", toolName: "read" });
+						emit({ type: "turn_end", message: toolCall, toolResults: [toolResult] });
+						initialPending = true;
 						emit({ type: "turn_start" });
 						await new Promise<void>((resolve) => { releaseInitial = resolve; });
 					},
@@ -482,7 +500,7 @@ describe("background model performance selection", () => {
 					async followUp() {},
 					async dispose() {},
 					get messages() {
-						// SAFETY: This local fixture only appends Pi-compatible assistant messages above.
+						// SAFETY: This local fixture only appends Pi-compatible assistant and tool-result messages above.
 						return messages as ChildSession["messages"];
 					},
 					sessionFile: undefined,
@@ -496,6 +514,7 @@ describe("background model performance selection", () => {
 			model: candidates[0], modelCandidates: candidates,
 			modelRouting: { modelClass: "smart", source: "per-run", poolDigest: "background-hard-switch", candidates },
 			modelPerformance: { ...performanceConfig, firstTokenTimeoutMs: 20 },
+			toolBudget: { hard: 24, block: ["read"] },
 		});
 		const cacheKey = createModelPerformanceCacheKey(configured.modelRouting!, candidates);
 		const store = new ModelPerformanceStore();
@@ -512,6 +531,7 @@ describe("background model performance selection", () => {
 			assert.equal(result.model, candidates[1]);
 			assert.deepEqual(result.attemptedModels, candidates);
 			assert.equal(result.modelAttempts?.[0]?.failoverReason, "performance:hard");
+			assert.deepEqual(result.toolBudget, { hard: 24, block: ["read"], toolCount: 1, outcome: "within-budget" });
 			assert.deepEqual(launched, [candidates[0]]);
 			assert.deepEqual(retries, [candidates[1]]);
 			assert.equal(retryGuardObserved, true);
@@ -519,6 +539,62 @@ describe("background model performance selection", () => {
 			assert.deepEqual(statusModels, candidates);
 			assert.match(log, /model performance.*retrying the incomplete response/i);
 			assert.equal(store.read(cacheKey, performanceConfig.cacheTtlMs).some(({ candidate }) => candidate === candidates[0]), false);
+		} finally {
+			clearInterval(keepAlive);
+		}
+	});
+
+	it("explains when an exhausted usage budget cancels a hard-stall retry", { timeout: 2_000 }, async () => {
+		const candidates = ["gateway/budget-slow", "gateway/budget-fast"];
+		let retryAttempted = false;
+		const factory: ChildSessionFactory = {
+			async create(launch) {
+				let listener: ((event: ChildSessionEvent) => void) | undefined;
+				let releaseInitial: (() => void) | undefined;
+				let initialPending = false;
+				const emit = (event: ChildSessionEvent) => listener?.(event);
+				return {
+					subscribe(next) { listener = next; return () => { listener = undefined; }; },
+					async prompt() {
+						initialPending = true;
+						emit({ type: "turn_start" });
+						await new Promise<void>((resolve) => { releaseInitial = resolve; });
+					},
+					async abort() {
+						if (!initialPending) return;
+						initialPending = false;
+						const aborted = {
+							role: "assistant", content: [], model: launch.model,
+							stopReason: "aborted", errorMessage: "aborted",
+							usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+						};
+						emit({ type: "message_end", message: aborted });
+						releaseInitial?.();
+					},
+					async retryCurrentResponseWithModel(_model, canContinue) {
+						retryAttempted = canContinue?.("before-model") === true;
+					},
+					async switchModelForNextResponse() {},
+					async steer() {}, async followUp() {}, async dispose() {},
+					messages: [], sessionFile: undefined, sessionId: "background-usage-budget", modelId: launch.model,
+				} satisfies ChildSession;
+			},
+			async dispose() {},
+		};
+		const keepAlive = setInterval(() => {}, 100);
+		try {
+			const { result } = await run(step({
+				model: candidates[0], modelCandidates: candidates,
+				modelRouting: { modelClass: "smart", source: "per-run", poolDigest: "background-usage-budget", candidates },
+				modelPerformance: { ...performanceConfig, firstTokenTimeoutMs: 20 },
+			}), {
+				childSessions: factory,
+				usageBudget: { tokens: { hard: 100 } },
+				usageBudgetExhausted: () => true,
+			});
+			assert.equal(result.exitCode, 1);
+			assert.equal(retryAttempted, false);
+			assert.match(result.error ?? "", /usage budget is exhausted/i);
 		} finally {
 			clearInterval(keepAlive);
 		}
