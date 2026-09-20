@@ -73,14 +73,14 @@ export function row(content: string, width: number, theme: Theme): string {
 	return theme.fg("border", "│") + pad(clipped, innerW) + theme.fg("border", "│");
 }
 
-export function renderHeader(text: string, width: number, theme: Theme): string {
+export function renderHeader(text: string, width: number, theme: Theme, color: "accent" | "warning" = "accent"): string {
 	const innerW = width - 2;
 	const padLen = Math.max(0, innerW - visibleWidth(text));
 	const padLeft = Math.floor(padLen / 2);
 	const padRight = padLen - padLeft;
 	return (
 		theme.fg("border", "╭" + "─".repeat(padLeft)) +
-		theme.fg("accent", text) +
+		theme.fg(color, text) +
 		theme.fg("border", "─".repeat(padRight) + "╮")
 	);
 }
