@@ -1186,6 +1186,24 @@ export async function runSingleStepInner(
 	let launched = false;
 	let recoveryTask = task;
 	let stagedIndexBaseline: string | undefined;
+	const usageContinuationBudget = () => {
+		// Refresh the authoritative run ledger, already fed synchronously by onChildEvent.
+		const exhausted = ctx.usageBudgetExhausted?.();
+		if (exhausted === true) return "exhausted" as const;
+		if (!ctx.usageBudget) return "unconfigured" as const;
+		if (ctx.usageBudget.costUsd || !ctx.onChildEvent || exhausted !== false) return "unknown" as const;
+		return "available" as const;
+	};
+	const generationRetryBlockReason = () => {
+		if (ctx.timeoutSignal?.aborted) return "the run timed out";
+		if (ctx.stopSignal?.aborted) return "the run was stopped";
+		if (ctx.skipAcceptance?.()) return "the run is no longer accepting child work";
+		if (ctx.deadlineAt !== undefined && Date.now() >= ctx.deadlineAt) return "the run deadline elapsed";
+		const budget = usageContinuationBudget();
+		if (budget === "exhausted") return "the run usage budget is exhausted";
+		if (budget === "unknown") return "the run usage budget cannot safely authorize more generation";
+		return undefined;
+	};
 	modelLoop: while (modelIndex < candidates.length) {
 		if (ctx.timeoutSignal?.aborted || ctx.stopSignal?.aborted || ctx.skipAcceptance?.()) break modelLoop;
 		const candidate = candidates[modelIndex];
@@ -1339,6 +1357,7 @@ export async function runSingleStepInner(
 		const childRun = runChildSession(omitUndefinedProperties({
 			factory: ctx.childSessions,
 			launch,
+			generationRetryBlockReason,
 			prompt: `Task: ${recoveryTask}`,
 			childWatchdog,
 			childEventContext: { runId: ctx.id, stepIndex: ctx.flatIndex, agent: step.agent },
