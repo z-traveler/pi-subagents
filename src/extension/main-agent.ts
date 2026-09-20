@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { type ExtensionAPI, type ExtensionContext, type Skill } from "@earendil-works/pi-coding-agent";
 import { buildAgentMemoryInjection } from "../agents/agent-memory.ts";
-import { discoverAgents, findBlockingAgentDiagnostic, hasExplicitSystemPromptMode, resolveAgentName, type AgentConfig } from "../agents/agents.ts";
+import { discoverAgents, findBlockingAgentDiagnostic, resolveAgentName, type AgentConfig } from "../agents/agents.ts";
 import { buildSkillInjection, resolveSkills } from "../agents/skills.ts";
 import { resolveMcpDirectToolNames } from "../runs/shared/mcp-direct-tool-allowlist.ts";
 import { findModelInfo, THINKING_LEVELS, toModelInfo } from "../shared/model-info.ts";
@@ -173,11 +173,8 @@ export function registerNamedMainAgent(pi: ExtensionAPI): void {
 			if (diagnostic) throw new Error(`Main agent '${requested}' has invalid configuration in '${diagnostic.filePath}': ${diagnostic.error}`);
 			if (!resolution.agent) throw new Error(`Main agent '${requested}' was not found.`);
 
-			const mainAgent = hasExplicitSystemPromptMode(resolution.agent)
-				? resolution.agent
-				: { ...resolution.agent, systemPromptMode: "append" as const };
-			await applyMainAgent(pi, ctx, mainAgent);
-			activeAgent = mainAgent;
+			await applyMainAgent(pi, ctx, resolution.agent);
+			activeAgent = resolution.agent;
 		} catch (error) {
 			startupError = error instanceof Error ? error : new Error(String(error));
 			if (ctx.mode === "print" || ctx.mode === "json") process.exitCode = 1;
