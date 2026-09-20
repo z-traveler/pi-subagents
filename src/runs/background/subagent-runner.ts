@@ -1123,8 +1123,7 @@ export async function runSingleStepInner(
 	let launchWarningsEmitted = false;
 	let recoveryState: LogicalRecoveryState = "unused";
 	let readonlyContinuation: RunChildSessionInput["readonlyContinuation"];
-	const continuationBudget = () => {
-		if (step.toolBudget) return "tool-budget-configured" as const;
+	const usageContinuationBudget = () => {
 		// Refresh the authoritative run ledger, already fed synchronously by onChildEvent.
 		const exhausted = ctx.usageBudgetExhausted?.();
 		if (exhausted === true) return "exhausted" as const;
@@ -1132,9 +1131,20 @@ export async function runSingleStepInner(
 		if (ctx.usageBudget.costUsd || !ctx.onChildEvent || exhausted !== false) return "unknown" as const;
 		return "available" as const;
 	};
+	const continuationBudget = () => step.toolBudget ? "tool-budget-configured" as const : usageContinuationBudget();
 	const lifecycleAllowsContinuation = () => !ctx.timeoutSignal?.aborted && !ctx.stopSignal?.aborted
 		&& !ctx.skipAcceptance?.() && (ctx.deadlineAt === undefined || Date.now() < ctx.deadlineAt);
 	const canContinue = () => lifecycleAllowsContinuation() && ["available", "unconfigured"].includes(continuationBudget());
+	const generationRetryBlockReason = () => {
+		if (ctx.timeoutSignal?.aborted) return "the run timed out";
+		if (ctx.stopSignal?.aborted) return "the run was stopped";
+		if (ctx.skipAcceptance?.()) return "the run is no longer accepting child work";
+		if (ctx.deadlineAt !== undefined && Date.now() >= ctx.deadlineAt) return "the run deadline elapsed";
+		const budget = usageContinuationBudget();
+		if (budget === "exhausted") return "the run usage budget is exhausted";
+		if (budget === "unknown") return "the run usage budget cannot safely authorize more generation";
+		return undefined;
+	};
 	const failContinuationLaunch = (candidate: string | undefined, error: unknown) => {
 		const message = error instanceof Error ? error.message : String(error);
 		modelAttempts.push({ model: candidate ?? "default", success: false, exitCode: 1, error: message });
@@ -1298,6 +1308,7 @@ export async function runSingleStepInner(
 			collectReadonlyEvidence: true,
 			readonlyContinuation,
 			canContinue,
+			generationRetryBlockReason,
 			prompt: `Task: ${attemptTask}`,
 			childWatchdog,
 			childEventContext: { runId: ctx.id, stepIndex: ctx.flatIndex, agent: step.agent },

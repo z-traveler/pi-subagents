@@ -115,6 +115,7 @@ export interface RunChildSessionInput {
 	readonlyContinuation?: { source: ChildSession; expected: SettledReadonlyEvidence; modelId: string };
 	collectReadonlyEvidence?: boolean;
 	canContinue?: () => boolean;
+	generationRetryBlockReason?: () => string | undefined;
 	modelPerformance?: {
 		candidates: readonly string[];
 		currentCandidate: string;
@@ -871,17 +872,23 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 					messages.splice(retry.messageCount);
 					assistantError = retry.assistantError;
 					let retryAuthorized = false;
+					let retryBlockedReason: string | undefined;
 					await created.retryCurrentResponseWithModel!(retry.action.to, (phase) => {
-						const allowed = !settled
-						&& !promptSettled
-						&& !interrupted
-						&& !timedOut
-						&& !stopped
-						&& !created.shutDown
-						&& input.timeoutSignal?.aborted !== true
-						&& input.stopSignal?.aborted !== true
-						&& (input.runDeadlineAt === undefined || Date.now() < input.runDeadlineAt)
-						&& input.canContinue?.() !== false;
+						const blockReason = settled || promptSettled
+							? "the child run already settled"
+							: interrupted
+								? "the run was interrupted"
+								: timedOut || input.timeoutSignal?.aborted === true
+									? "the run timed out"
+									: stopped || input.stopSignal?.aborted === true
+										? "the run was stopped"
+										: created.shutDown
+											? "the child session shut down"
+											: input.runDeadlineAt !== undefined && Date.now() >= input.runDeadlineAt
+												? "the run deadline elapsed"
+												: input.generationRetryBlockReason?.();
+						const allowed = blockReason === undefined;
+						if (!allowed) retryBlockedReason ??= blockReason;
 						if (allowed && phase !== "before-model" && !retryAuthorized) {
 							retryAuthorized = true;
 							recordPerformanceAttempt(retry.action);
@@ -893,7 +900,7 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 						return allowed;
 					});
 					if (!retryAuthorized && !settled && !promptSettled && !interrupted && !timedOut && !stopped) {
-						throw new Error("Model performance retry was cancelled because the child lifecycle no longer permits generation.");
+						throw new Error(`Model performance retry was cancelled because ${retryBlockedReason ?? "generation did not restart"}.`);
 					}
 				}
 				promptSettled = true;
