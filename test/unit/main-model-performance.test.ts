@@ -88,9 +88,11 @@ test("a slow main response keeps running, emits one advisory, and warms alternat
 
 	assert.equal(advisories.length, 1, "the same slow model must not reopen the advisory");
 	assert.equal(advisories[0]?.durationMs, 30_000);
+	assert.equal(advisories[0]?.details.recommendedModelEstimatedTokensPerSecond, 40);
+	assert.equal(advisories[0]?.details.recommendedModelThroughputAssessment, "normal");
 	assert.deepEqual(probes, [["cliproxy/fast-b"]]);
 	assert.match(formatMainModelPerformanceAdvisory(advisories[0]!.details), /main model was not switched/i);
-	assert.match(formatMainModelPerformanceAdvisory(advisories[0]!.details), /cliproxy\/fast-b/);
+	assert.match(formatMainModelPerformanceAdvisory(advisories[0]!.details), /Recommended fast \[40\.0 token\/s\]: cliproxy\/fast-b/);
 });
 
 test("zero advisory duration suppresses the popup without disabling background probes", () => {
@@ -201,6 +203,8 @@ test("does not attribute an actual low-thinking run to a high-thinking pool cand
 	runtime.tick();
 	assert.deepEqual(invalidated, []);
 	assert.equal(displayed[0]?.recommendedModel, "cliproxy/fast-b");
+	assert.equal(displayed[0]?.recommendedModelEstimatedTokensPerSecond, undefined);
+	assert.match(formatMainModelPerformanceAdvisory(displayed[0]!), /Recommended fast \[no fresh sample\]: cliproxy\/fast-b/);
 	assert.deepEqual(probes, [["cliproxy/fast-b"]]);
 
 	runtime.endTurn();
@@ -243,10 +247,11 @@ test("a tolerably slow rolling rate is advisory and waits for the main response 
 	assert.equal(advisories.length, 1);
 });
 
-test("the registered Pi seam opens an Esc-dismissible advisory overlay without adding a card", () => {
+test("the registered Pi seam opens a fixed lower-right advisory with severity-colored details", () => {
 	let now = 0;
 	const handlers = new Map<string, Array<(event: any, ctx: any) => void>>();
 	let overlay: { render(width: number): string[]; handleInput(data: string): void; dispose?(): void } | undefined;
+	const painted: Array<{ color: string; text: string }> = [];
 	let closed = 0;
 	let appended = 0;
 	let renderers = 0;
@@ -268,9 +273,20 @@ test("the registered Pi seam opens an Esc-dismissible advisory overlay without a
 		hasUI: true,
 		mode: "tui",
 		ui: {
-			custom: (factory: Function, options: { overlay?: boolean }) => {
+			custom: (factory: Function, options: { overlay?: boolean; overlayOptions?: unknown }) => {
 				assert.equal(options.overlay, true);
-				overlay = factory({}, { fg: (_color: string, text: string) => text }, undefined, () => { closed++; overlay?.dispose?.(); });
+				assert.deepEqual(options.overlayOptions, {
+					anchor: "bottom-right",
+					width: 74,
+					maxHeight: 6,
+					margin: { top: 1, right: 2, bottom: 5, left: 1 },
+				});
+				overlay = factory({}, {
+					fg: (color: string, text: string) => {
+						painted.push({ color, text });
+						return text;
+					},
+				}, undefined, () => { closed++; overlay?.dispose?.(); });
 				return Promise.resolve();
 			},
 		},
@@ -281,7 +297,17 @@ test("the registered Pi seam opens an Esc-dismissible advisory overlay without a
 	const runtime = registerMainModelPerformanceAdvisory(pi as never, {
 		now: () => now,
 		schedule: () => () => {},
-		store: { read: () => [], record() {}, invalidate() {} },
+		store: {
+			read: () => [{
+				candidate: "cliproxy/fast-b",
+				recordedAt: 1_000,
+				ttftMs: 250,
+				estimatedTokensPerSecond: 40,
+				source: "probe" as const,
+			}],
+			record() {},
+			invalidate() {},
+		},
 		discover: () => ({
 			modelPools: { fast: ["cliproxy/fast-a", "cliproxy/fast-b"] },
 			modelPerformance: DEFAULT_MODEL_PERFORMANCE_CONFIG,
@@ -293,7 +319,12 @@ test("the registered Pi seam opens an Esc-dismissible advisory overlay without a
 	now = DEFAULT_MODEL_PERFORMANCE_CONFIG.firstTokenTimeoutMs;
 	runtime.tick();
 
-	assert.match(overlay?.render(100)[0] ?? "", /^╭.*Main model is responding slowly/);
+	assert.match(overlay?.render(74)[0] ?? "", /^╭.*Main model is responding slowly/);
+	assert.ok(painted.some(({ color, text }) => color === "warning" && /Main model is responding slowly/.test(text)));
+	assert.ok(painted.some(({ color, text }) => color === "error" && /No generated output/.test(text)));
+	assert.ok(painted.some(({ color, text }) => color === "accent" && text === "cliproxy/fast-a"));
+	assert.ok(painted.some(({ color, text }) => color === "accent" && text === "cliproxy/fast-b"));
+	assert.ok(painted.some(({ color, text }) => color === "success" && text === "40.0 token/s"));
 	overlay?.handleInput("\u001b");
 	assert.equal(closed, 1);
 	assert.equal(appended, 0);
@@ -373,12 +404,13 @@ test("headless sessions stay silent and ambiguous class matches show only a gene
 	assert.equal(displayed.length, 1);
 	assert.equal(displayed[0]?.modelClass, undefined);
 	assert.equal(displayed[0]?.recommendedModel, undefined);
-	assert.match(formatMainModelPerformanceAdvisory(displayed[0]!), /does not map to exactly one configured model class/);
+	assert.match(formatMainModelPerformanceAdvisory(displayed[0]!), /does not map to one configured model class/);
 	assert.equal(probes, 0);
 });
 
-test("model performance command shows cached measurements and order for every class without scrolling", async () => {
+test("model performance command shows a compact color-tiered cache report", async () => {
 	const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
+	const painted: Array<{ color: string; text: string }> = [];
 	const pi = {
 		on() {},
 		registerCommand(name: string, command: { handler: (args: string, ctx: any) => Promise<void> }) { commands.set(name, command); },
@@ -392,12 +424,27 @@ test("model performance command shows cached measurements and order for every cl
 				ttftMs: 250,
 				estimatedTokensPerSecond: 40,
 				source: "probe" as const,
+			}, {
+				candidate: "cliproxy/fast-a",
+				recordedAt: 1_000,
+				ttftMs: 250,
+				estimatedTokensPerSecond: 1,
+				source: "run" as const,
+			}] : key.modelClass === "smart" ? [{
+				candidate: "cliproxy/smart-a",
+				recordedAt: 1_000,
+				ttftMs: 250,
+				estimatedTokensPerSecond: 5,
+				source: "probe" as const,
 			}] : [],
 			record() {},
 			invalidate() {},
 		},
 		discover: () => ({
-			modelPools: { fast: ["cliproxy/fast-a", "cliproxy/fast-b"], smart: ["cliproxy/smart-a"] },
+			modelPools: {
+				fast: ["cliproxy/fast-a", "cliproxy/fast-b"],
+				smart: ["cliproxy/smart-a", "cliproxy/smart-b"],
+			},
 			modelPerformance: DEFAULT_MODEL_PERFORMANCE_CONFIG,
 		}),
 	});
@@ -406,15 +453,25 @@ test("model performance command shows cached measurements and order for every cl
 		hasUI: true,
 		mode: "tui",
 		model: { provider: "cliproxy", id: "fast-a" },
-		modelRegistry: { getAvailable: () => models },
+		modelRegistry: { getAvailable: () => [...models, { provider: "cliproxy", id: "smart-b", fullId: "cliproxy/smart-b" }] },
 		ui: {
-			custom: async (factory: Function, options: { overlay?: boolean; overlayOptions?: { width?: string } }) => {
+			custom: async (factory: Function, options: { overlay?: boolean; overlayOptions?: unknown }) => {
 				assert.equal(options.overlay, true);
-				assert.equal(options.overlayOptions?.width, "85%");
+				assert.deepEqual(options.overlayOptions, {
+					anchor: "center",
+					width: 96,
+					maxHeight: "80%",
+					margin: 2,
+				});
 				let closed = false;
-				const theme = { fg: (_color: string, text: string) => text };
+				const theme = {
+					fg: (color: string, text: string) => {
+						painted.push({ color, text });
+						return text;
+					},
+				};
 				const component = factory({}, theme, undefined, () => { closed = true; });
-				const renderedLines: string[] = component.render(80);
+				const renderedLines: string[] = component.render(96);
 				const rendered = renderedLines.join("\n");
 				assert.match(renderedLines[0] ?? "", /^╭/);
 				assert.match(renderedLines.at(-1) ?? "", /^╰/);
@@ -425,10 +482,14 @@ test("model performance command shows cached measurements and order for every cl
 				assert.match(rendered, /2\. cliproxy\/fast-a/);
 				assert.doesNotMatch(rendered, /\[configured \d+\]/);
 				assert.match(rendered, /smart/);
-				assert.match(rendered, /cliproxy\/smart-a.*no fresh sample/);
+				assert.match(rendered, /cliproxy\/smart-b.*no fresh sample/);
 				assert.match(rendered, /5 min/);
+				assert.ok(painted.some(({ color, text }) => color === "success" && text === "40.0 token/s"));
+				assert.ok(painted.some(({ color, text }) => color === "warning" && text === "5.0 token/s"));
+				assert.ok(painted.some(({ color, text }) => color === "error" && text === "1.0 token/s"));
+				assert.ok(painted.some(({ color, text }) => color === "dim" && text === "no fresh sample"));
 				component.handleInput("j");
-				assert.equal(component.render(80).join("\n"), rendered);
+				assert.equal(component.render(96).join("\n"), rendered);
 				component.handleInput("\u001b");
 				assert.equal(closed, true);
 			},

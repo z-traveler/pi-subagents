@@ -31,12 +31,16 @@ export interface MainModelPerformanceAdvisoryDetails {
 	currentModel: string;
 	modelClass?: string;
 	recommendedModel?: string;
+	recommendedModelEstimatedTokensPerSecond?: number;
+	recommendedModelThroughputAssessment?: ThroughputAssessment;
 	ttftMs: number;
 	estimatedTokensPerSecond?: number;
 }
 
 export interface MainModelPerformanceSnapshot {
 	cacheTtlMs: number;
+	hardTokensPerSecond: number;
+	softTokensPerSecond: number;
 	classes: Array<{
 		modelClass: string;
 		candidates: string[];
@@ -139,6 +143,15 @@ function successfulAssistantMessage(message: { role?: unknown; stopReason?: unkn
 		&& (message.stopReason === "stop" || message.stopReason === "length" || message.stopReason === "toolUse");
 }
 
+function assessObservedThroughput(
+	tokensPerSecond: number,
+	thresholds: Pick<ModelPerformanceConfig, "hardTokensPerSecond" | "softTokensPerSecond">,
+): ThroughputAssessment {
+	if (tokensPerSecond < thresholds.hardTokensPerSecond) return "hard";
+	if (tokensPerSecond < thresholds.softTokensPerSecond) return "soft";
+	return "normal";
+}
+
 function cacheKey(route: Pick<MainModelPerformanceRoute, "modelClass" | "poolDigest" | "candidates">): ModelPerformanceCacheKey {
 	return createModelPerformanceCacheKey(route, route.candidates);
 }
@@ -237,14 +250,19 @@ export class MainModelPerformanceRuntime {
 
 	snapshot(context: MainPerformanceContext): MainModelPerformanceSnapshot {
 		const availableModels = context.modelRegistry.getAvailable().map(toModelInfo);
-		const ttlMs = (this.settings.modelPerformance ?? DEFAULT_MODEL_PERFORMANCE_CONFIG).cacheTtlMs;
+		const config = this.settings.modelPerformance ?? DEFAULT_MODEL_PERFORMANCE_CONFIG;
 		const classes = Object.entries(this.settings.modelPools ?? {}).map(([modelClass, configuredCandidates]) => {
 			const candidates = canonicalModelCandidates(configuredCandidates, availableModels, context.model?.provider ?? "");
 			const route = { modelClass, poolDigest: modelPoolDigest(modelClass, candidates), candidates };
-			const observations = this.readObservations(route, ttlMs);
+			const observations = this.readObservations(route, config.cacheTtlMs);
 			return { modelClass, candidates, observations, rankedCandidates: rankModelCandidates(candidates, observations) };
 		});
-		return { cacheTtlMs: ttlMs, classes };
+		return {
+			cacheTtlMs: config.cacheTtlMs,
+			hardTokensPerSecond: config.hardTokensPerSecond,
+			softTokensPerSecond: config.softTokensPerSecond,
+			classes,
+		};
 	}
 
 	tick(): void {
@@ -286,9 +304,13 @@ export class MainModelPerformanceRuntime {
 		if (this.warnedModels.has(warningKey)) return;
 		this.warnedModels.add(warningKey);
 		const sample = turn.monitor.complete(at);
+		const recommendationObservations = route && alternatives.length > 0
+			? this.readObservations(route, turn.config.cacheTtlMs)
+			: [];
 		const recommendedModel = route && alternatives.length > 0
-			? rankModelCandidates(alternatives, this.readObservations(route, turn.config.cacheTtlMs))[0]
+			? rankModelCandidates(alternatives, recommendationObservations)[0]
 			: undefined;
+		const recommendedObservation = recommendationObservations.find(({ candidate }) => candidate === recommendedModel);
 		try {
 			const details: MainModelPerformanceAdvisoryDetails = {
 				assessment,
@@ -297,6 +319,13 @@ export class MainModelPerformanceRuntime {
 			};
 			if (route) details.modelClass = route.modelClass;
 			if (recommendedModel) details.recommendedModel = recommendedModel;
+			if (recommendedObservation) {
+				details.recommendedModelEstimatedTokensPerSecond = recommendedObservation.estimatedTokensPerSecond;
+				details.recommendedModelThroughputAssessment = assessObservedThroughput(
+					recommendedObservation.estimatedTokensPerSecond,
+					turn.config,
+				);
+			}
 			if (sample) details.estimatedTokensPerSecond = sample.estimatedTokensPerSecond;
 			this.options.display(details, turn.context, durationMs);
 		} catch {
@@ -353,10 +382,10 @@ export function formatMainModelPerformanceAdvisory(details: MainModelPerformance
 		? `No generated output was observed for ${(details.ttftMs / 1_000).toFixed(1)}s.`
 		: `Estimated generation throughput is ${details.estimatedTokensPerSecond.toFixed(1)} token/s.`;
 	const recommendation = details.recommendedModel && details.modelClass
-		? `Suggested ${details.modelClass} candidate: ${details.recommendedModel}.`
+		? `Recommended ${details.modelClass} [${details.recommendedModelEstimatedTokensPerSecond === undefined ? "no fresh sample" : `${details.recommendedModelEstimatedTokensPerSecond.toFixed(1)} token/s`}]: ${details.recommendedModel}`
 		: details.modelClass
 			? `No other ${details.modelClass} candidate can be recommended from the current pool.`
-			: "The current model does not map to exactly one configured model class, so no candidate is recommended.";
+			: "No suggestion: current model does not map to one configured model class.";
 	return [
 		"⚠ Main model is responding slowly",
 		`Current model: ${details.currentModel}`,
@@ -387,17 +416,92 @@ export function formatMainModelPerformanceReport(snapshot: MainModelPerformanceS
 	return lines;
 }
 
+type MainModelPerformanceOverlayPresentation =
+	| { kind: "advisory"; details: MainModelPerformanceAdvisoryDetails }
+	| { kind: "report"; snapshot: MainModelPerformanceSnapshot };
+
+function styleLabeledValue(theme: Theme, line: string, label: string, valueColor: "accent" | "success"): string {
+	if (!line.startsWith(label)) return theme.fg("text", line);
+	return theme.fg("muted", label) + theme.fg(valueColor, line.slice(label.length));
+}
+
+function styleAdvisoryLine(theme: Theme, line: string, index: number, details: MainModelPerformanceAdvisoryDetails): string {
+	if (index === 1) return styleLabeledValue(theme, line, "Current model: ", "accent");
+	if (index === 2) return theme.fg(details.assessment === "hard" ? "error" : "warning", line);
+	if (index === 3) {
+		const reassurance = "Current response continues;";
+		return theme.fg("success", reassurance) + theme.fg("muted", line.slice(reassurance.length));
+	}
+	if (index === 4 && details.recommendedModel && details.modelClass) {
+		const rate = details.recommendedModelEstimatedTokensPerSecond;
+		const assessment = details.recommendedModelThroughputAssessment;
+		const rateText = rate === undefined ? "no fresh sample" : `${rate.toFixed(1)} token/s`;
+		const rateColor = assessment === "hard" ? "error" : assessment === "soft" ? "warning" : assessment === "normal" ? "success" : "dim";
+		return theme.fg("muted", "Recommended ")
+			+ theme.fg("accent", details.modelClass)
+			+ theme.fg("dim", " [")
+			+ theme.fg(rateColor, rateText)
+			+ theme.fg("dim", "]: ")
+			+ theme.fg("accent", details.recommendedModel);
+	}
+	return theme.fg("warning", line);
+}
+
+function throughputColor(
+	tokensPerSecond: number,
+	snapshot: MainModelPerformanceSnapshot,
+): "error" | "warning" | "success" {
+	const assessment = assessObservedThroughput(tokensPerSecond, snapshot);
+	return assessment === "hard" ? "error" : assessment === "soft" ? "warning" : "success";
+}
+
+function styleReportLine(theme: Theme, line: string, index: number, snapshot: MainModelPerformanceSnapshot): string {
+	if (!line) return line;
+	if (index === 1) return theme.fg("muted", line);
+	if (line === "No configured model classes.") return theme.fg("warning", line);
+	if (!line.startsWith("  ") && line.endsWith(":")) return theme.fg("accent", line);
+	for (const modelClass of snapshot.classes) {
+		const observations = new Map(modelClass.observations.map((observation) => [observation.candidate, observation]));
+		for (const [candidateIndex, candidate] of modelClass.rankedCandidates.entries()) {
+			const prefix = `  ${candidateIndex + 1}. ${candidate} · `;
+			if (!line.startsWith(prefix)) continue;
+			const rank = theme.fg("dim", `  ${candidateIndex + 1}. `);
+			const model = theme.fg(candidateIndex === 0 ? "success" : "text", candidate);
+			const separator = theme.fg("dim", " · ");
+			const observation = observations.get(candidate);
+			if (!observation) return rank + model + separator + theme.fg("dim", "no fresh sample");
+			return rank
+				+ model
+				+ separator
+				+ theme.fg("muted", `${observation.ttftMs.toFixed(0)}ms TTFT`)
+				+ separator
+				+ theme.fg(throughputColor(observation.estimatedTokensPerSecond, snapshot), `${observation.estimatedTokensPerSecond.toFixed(1)} token/s`)
+				+ separator
+				+ theme.fg("dim", observation.source);
+		}
+	}
+	return theme.fg("text", line);
+}
+
 class MainModelPerformanceOverlay implements Component {
 	private readonly lines: string[];
 	private readonly theme: Theme;
 	private readonly done: () => void;
+	private readonly presentation: MainModelPerformanceOverlayPresentation;
 	private readonly timer?: ReturnType<typeof setTimeout>;
 	private closed = false;
 
-	constructor(lines: string[], theme: Theme, done: () => void, durationMs?: number) {
+	constructor(
+		lines: string[],
+		theme: Theme,
+		done: () => void,
+		presentation: MainModelPerformanceOverlayPresentation,
+		durationMs?: number,
+	) {
 		this.lines = lines;
 		this.theme = theme;
 		this.done = done;
+		this.presentation = presentation;
 		if (durationMs !== undefined) {
 			this.timer = setTimeout(() => this.close(), durationMs);
 			this.timer.unref?.();
@@ -413,8 +517,19 @@ class MainModelPerformanceOverlay implements Component {
 	render(width: number): string[] {
 		const panelWidth = Math.max(3, Math.floor(width));
 		return [
-			renderHeader(truncateToWidth(this.lines[0] ?? "", panelWidth - 2), panelWidth, this.theme),
-			...this.lines.slice(1, -1).map((line) => row(line, panelWidth, this.theme)),
+			renderHeader(
+				truncateToWidth(this.lines[0] ?? "", panelWidth - 2),
+				panelWidth,
+				this.theme,
+				this.presentation.kind === "advisory" ? "warning" : "accent",
+			),
+			...this.lines.slice(1, -1).map((line, index) => row(
+				this.presentation.kind === "advisory"
+					? styleAdvisoryLine(this.theme, line, index + 1, this.presentation.details)
+					: styleReportLine(this.theme, line, index + 1, this.presentation.snapshot),
+				panelWidth,
+				this.theme,
+			)),
 			renderFooter(this.lines.at(-1) ?? "", panelWidth, this.theme),
 		];
 	}
@@ -459,8 +574,22 @@ export function registerMainModelPerformanceAdvisory(
 			const lines = formatMainModelPerformanceAdvisory(details).split("\n");
 			lines.push("Esc closes.");
 			void uiContext.ui.custom<void>(
-				(_tui, theme, _keybindings, done) => new MainModelPerformanceOverlay(lines, theme, done, durationMs),
-				{ overlay: true, overlayOptions: { anchor: "center", width: "85%", minWidth: 60, maxHeight: "80%", margin: 1 } },
+				(_tui, theme, _keybindings, done) => new MainModelPerformanceOverlay(
+					lines,
+					theme,
+					done,
+					{ kind: "advisory", details },
+					durationMs,
+				),
+				{
+					overlay: true,
+					overlayOptions: {
+						anchor: "bottom-right",
+						width: 74,
+						maxHeight: 6,
+						margin: { top: 1, right: 2, bottom: 5, left: 1 },
+					},
+				},
 			).catch(() => {});
 		},
 	};
@@ -481,10 +610,16 @@ export function registerMainModelPerformanceAdvisory(
 				if (context.hasUI) context.ui.notify("Model performance overlay requires the Pi TUI.", "info");
 				return;
 			}
-			const lines = formatMainModelPerformanceReport(runtime.snapshot(context));
+			const snapshot = runtime.snapshot(context);
+			const lines = formatMainModelPerformanceReport(snapshot);
 			await context.ui.custom<void>(
-				(_tui, theme, _keybindings, done) => new MainModelPerformanceOverlay(lines, theme, done),
-				{ overlay: true, overlayOptions: { anchor: "center", width: "85%", minWidth: 60, maxHeight: "90%", margin: 1 } },
+				(_tui, theme, _keybindings, done) => new MainModelPerformanceOverlay(
+					lines,
+					theme,
+					done,
+					{ kind: "report", snapshot },
+				),
+				{ overlay: true, overlayOptions: { anchor: "center", width: 96, maxHeight: "80%", margin: 2 } },
 			);
 		},
 	});
