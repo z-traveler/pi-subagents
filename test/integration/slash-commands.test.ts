@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, it } from "node:test";
-import { TUI, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { TuiMainScreen, visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
 import { registerAgent } from "../../src/api/agents.ts";
 import { clearRuntimeAgentsForPi } from "../../src/agents/runtime-agent-registry.ts";
@@ -225,7 +225,7 @@ describe("Esc while a slash agent is running", () => {
 					getThinkingLevel() { return "off"; },
 				};
 				let sendInput!: (data: string) => void;
-				const tui = new TUI({
+				const tui = new TuiMainScreen({
 					columns: 100, rows: 40, kittyProtocolActive: false,
 					start(input: typeof sendInput) { sendInput = input; },
 					stop() {}, write() {}, hideCursor() {}, showCursor() {},

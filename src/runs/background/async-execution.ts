@@ -1965,6 +1965,7 @@ export function executeAsyncSingle(
 					scope: modelScopes,
 					primaryModelFromParent: modelOrigin === "inherited",
 					origin: modelOrigin,
+					ignoreCachedExclusions: Boolean(params.modelOverride ?? agentConfig.model),
 				}),
 				effectiveThinking,
 				params.thinkingOverride !== undefined,

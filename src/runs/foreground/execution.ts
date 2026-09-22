@@ -1997,6 +1997,7 @@ async function runSyncCompletionInner(
 			scope: options.modelScope,
 			primaryModelFromParent: options.modelOverrideFromParent,
 			origin: options.modelOrigin ?? (options.modelOverrideFromParent ? "inherited" : "configured"),
+			ignoreCachedExclusions: Boolean(options.modelOverride ?? agent.model),
 		},
 	);
 	const frozenCandidates = applyThinkingToModelCandidates(

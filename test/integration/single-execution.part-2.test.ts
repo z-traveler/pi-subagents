@@ -2536,7 +2536,8 @@ if (!fs.existsSync(${JSON.stringify(holdPath)})) { console.log('{}'); } else {
 
 		assert.equal(result.exitCode, 1);
 		assert.equal(result.model, "openai/gpt-5-mini");
-		assert.equal("modelAttempts" in result, false);
+		assert.equal(Array.isArray(result.modelAttempts), true);
+	assert.equal(result.modelAttempts?.length, 1);
 		assert.equal(mockPi.callCount(), 1);
 	});
 

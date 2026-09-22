@@ -3857,6 +3857,9 @@ export async function runSubagent(
 					...(step.sessionFiles?.[itemIndex] ? { sessionFile: step.sessionFiles[itemIndex] } : {}),
 					...(thinkingOverride ? {
 						...(model ? { model } : {}),
+						...(step.parallel.modelCandidates ? {
+							modelCandidates: step.parallel.modelCandidates.map((candidate) => applyThinkingSuffix(candidate, thinkingOverride, true) ?? candidate),
+						} : {}),
 						...(thinking ? { thinking } : {}),
 					} : {}),
 					structuredOutputSchema: step.parallel.structuredOutputSchema ?? step.parallel.structuredOutput?.schema,
