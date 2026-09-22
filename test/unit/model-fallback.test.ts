@@ -688,14 +688,11 @@ describe("resolveSubagentModelOverride (cross-session inherit, issue #266)", () 
 		);
 	});
 
-	it("fails visibly when an explicit model is excluded instead of falling back", () => {
+	it("preserves an explicit model despite a cached exclusion", () => {
 		recordModelFailure({ modelId: "gpt-5-mini", provider: "openai", reason: "rate limit" });
-		assert.throws(
-			() => resolveEffectiveSubagentModel("openai/gpt-5-mini", undefined, parentModel, availableModels),
-			(error: unknown) => {
-				const message = String(error);
-				return message.includes("openai/gpt-5-mini") && message.includes("rate limit") && message.includes("expires:");
-			},
+		assert.equal(
+			resolveEffectiveSubagentModel("openai/gpt-5-mini", undefined, parentModel, availableModels),
+			"openai/gpt-5-mini",
 		);
 	});
 
