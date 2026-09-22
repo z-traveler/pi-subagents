@@ -7,7 +7,6 @@ import { runSingleStepInner, runSubagent } from "../../src/runs/background/subag
 import type { ChildSession, ChildSessionEvent, ChildSessionFactory } from "../../src/runs/shared/child-session.ts";
 import { createModelPerformanceCacheKey, ModelPerformanceStore } from "../../src/runs/shared/model-performance.ts";
 import { MODEL_PERFORMANCE_PROBE_MAX_ESTIMATED_TOKENS } from "../../src/runs/shared/model-performance-probe.ts";
-import { clearExclusions, getExcludedCount } from "../../src/runs/shared/model-exclusions.ts";
 import type { RunnerSubagentStep } from "../../src/runs/shared/parallel-utils.ts";
 import type { UsageBudgetConfig } from "../../src/shared/types.ts";
 
@@ -405,8 +404,7 @@ describe("background model performance selection", () => {
 		assert.deepEqual(backgroundTasks, []);
 	});
 
-	it("does not cool down a failed model-class candidate across tasks", async () => {
-		clearExclusions();
+	it("fails over within a model class without cross-run exclusion state", async () => {
 		const configured = step({
 			model: "gateway/no-cooldown-a",
 			modelCandidates: ["gateway/no-cooldown-a", "gateway/no-cooldown-b"],
@@ -422,7 +420,6 @@ describe("background model performance selection", () => {
 
 		assert.deepEqual(launched, ["gateway/no-cooldown-a", "gateway/no-cooldown-b"]);
 		assert.equal(result.exitCode, 0, result.error);
-		assert.equal(getExcludedCount(), 0);
 	});
 
 	it("retries a hard-stalled incomplete response without resetting its tool budget", { timeout: 2_000 }, async () => {

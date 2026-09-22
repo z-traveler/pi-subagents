@@ -4,7 +4,6 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import {
 	type ModelPerformanceProbeExecutor,
-	type ModelPerformanceProbeResult,
 	type WarmModelPerformanceCacheOptions,
 	warmModelPerformanceCache,
 } from "../runs/shared/model-performance-probe.ts";
@@ -103,16 +102,6 @@ export function createPiModelPerformanceProbeExecutor(
 export interface RunPiModelPerformanceProbesOptions {
 	store?: ModelPerformanceStore;
 	streamFn?: StreamFn;
-	onResult?: (result: ModelPerformanceProbeResult, request: MainModelPerformanceProbeRequest) => void;
-}
-
-export function formatModelPerformanceProbeResult(result: ModelPerformanceProbeResult): string {
-	if (result.status === "sampled") {
-		return `Model probe ${result.candidate}: ${result.observation.ttftMs.toFixed(0)}ms first token, ${result.observation.estimatedTokensPerSecond.toFixed(1)} token/s.`;
-	}
-	if (result.status === "failed") return `Model probe ${result.candidate} failed: ${result.error}`;
-	if (result.status === "timed-out") return `Model probe ${result.candidate} timed out.`;
-	return `Model probe ${result.candidate} was cancelled.`;
 }
 
 export function createMainModelPerformanceProbe(
@@ -133,7 +122,6 @@ export function createMainModelPerformanceProbe(
 			execute: createPiModelPerformanceProbeExecutor(context, executorOptions),
 		};
 		if (context.signal) warmOptions.signal = context.signal;
-		if (options.onResult) warmOptions.onResult = (result) => options.onResult?.(result, request);
 		await warmModelPerformanceCache(warmOptions);
 	};
 }
