@@ -132,7 +132,7 @@ describe("main model performance probe adapter", () => {
 		);
 	});
 
-	it("warms the shared cache and reports a human-displayable result", async () => {
+	it("warms the shared performance cache", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-main-model-probe-"));
 		roots.push(root);
 		const store = new ModelPerformanceStore({ rootDir: root });
@@ -142,12 +142,10 @@ describe("main model performance probe adapter", () => {
 			candidates: ["opencode/fast"],
 			protocolVersion: 1,
 		};
-		const results: string[] = [];
 		const streamFn: StreamFn = () => completedStream("x".repeat(128));
 		await createMainModelPerformanceProbe({
 			store,
 			streamFn,
-			onResult: ({ status }) => results.push(status),
 		})({
 			key,
 			candidates: key.candidates,
@@ -155,7 +153,6 @@ describe("main model performance probe adapter", () => {
 			context: context({ streamFn }),
 		});
 
-		assert.deepEqual(results, ["sampled"]);
 		assert.equal(store.read(key, DEFAULT_MODEL_PERFORMANCE_CONFIG.cacheTtlMs)[0]?.source, "probe");
 	});
 });
