@@ -379,7 +379,6 @@ export function resolveSubagentModelOverride(
 		const candidate = resolveSubagentModelCandidate(explicit, availableModels, preferredProvider);
 		if (options?.source === "explicit") {
 			resolved = candidate ?? resolveRequiredSubagentModelCandidate(explicit, availableModels, preferredProvider);
-			throwForExplicitModelExclusion(resolved);
 			resolvedFromRegistry = true;
 		} else if (candidate) {
 			resolved = candidate;
