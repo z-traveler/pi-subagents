@@ -117,7 +117,7 @@ Failover stays inside the selected class. Each entry is an independent candidate
 
 Model-class launches also use fresh first-token and generation-throughput observations. Candidates with measurements are ranked by the predicted time for a 128-token response (`first-token latency + 128 / token-per-second`); candidates without data retain their declared relative order. Real task responses supersede synthetic probe samples. Measurements expire after five minutes by default and affect ordering only, never class membership or cross-run eligibility.
 
-On a cold cache, the declared first candidate starts immediately. Bounded tool-free requests probe unmeasured alternatives in the background, with at most two probes active across local Pi processes. Each probe stops after 15 seconds or about 64 estimated output tokens and consumes real provider quota. Probe results are shown only in human-facing UI/run details and never added to the parent agent's result.
+On a cold cache, the declared first candidate starts immediately. Bounded tool-free requests probe unmeasured alternatives in the background, with at most two probes active across local Pi processes. Each probe stops after 15 seconds or about 64 estimated output tokens and consumes real provider quota. Probe measurements are retained in the performance cache and inspected with `/subagents-model-performance`; probe failures and timeouts are not sent as session notifications or added to the parent agent's result.
 
 For a child launched through `modelClass`, pi-subagents estimates output at four characters per token and monitors text, thinking, and tool-call deltas. It excludes tool execution, coordination waits, and retry backoff:
 

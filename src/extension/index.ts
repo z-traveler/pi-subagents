@@ -72,7 +72,7 @@ import { SUBAGENT_CHILD_ENV, SUBAGENT_PARENT_SESSION_ENV } from "../runs/shared/
 import { disposeChildSessions } from "../runs/shared/child-session.ts";
 import { resolveCurrentSubagentCapabilityCeiling } from "../runs/shared/capability-ceiling.ts";
 import { formatDuration, shortenPath } from "../shared/formatters.ts";
-import { applyModelExclusionsConfig, loadConfig, resolveAsyncByDefault, resolveScheduledStoreRoot } from "./config.ts";
+import { loadConfig, resolveAsyncByDefault, resolveScheduledStoreRoot } from "./config.ts";
 import { buildSubagentToolDescription, buildSubagentToolPromptMetadata } from "./tool-description.ts";
 import { formatWorkflowPreflightSummary, normalizeWorkflowPreflight } from "../workflows/workflow-preflight.ts";
 import { registerSessionFastMode } from "./session-fast-mode.ts";
@@ -84,7 +84,7 @@ import { resolveMissionStoreLocation } from "../missions/store.ts";
 import { listRetainedChildren } from "../runs/background/retained-children.ts";
 import { registerNamedMainAgent } from "./main-agent.ts";
 import { registerMainModelPerformanceAdvisory } from "./main-model-performance.ts";
-import { createMainModelPerformanceProbe, formatModelPerformanceProbeResult } from "./main-model-performance-probe.ts";
+import { createMainModelPerformanceProbe } from "./main-model-performance-probe.ts";
 import {
 	type Details,
 	type MainWindowRendererConfig,
@@ -471,13 +471,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	}
 	registerNamedMainAgent(pi);
 	registerMainModelPerformanceAdvisory(pi, {
-		probe: createMainModelPerformanceProbe({
-			onResult: (result, request) => {
-				if (result.status === "cancelled" || request.context.hasUI !== true) return;
-				const context = request.context as ExtensionContext;
-				context.ui.notify(formatModelPerformanceProbeResult(result), result.status === "sampled" ? "info" : "warning");
-			},
-		}),
+		probe: createMainModelPerformanceProbe(),
 	});
 	const runtimeRegistry = getRuntimeRegistry();
 
@@ -486,8 +480,6 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	cleanupOldChainDirs();
 
 	const config = loadConfig();
-	// Apply the process-wide exclusion TTL before any child launch can record a model failure.
-	applyModelExclusionsConfig(config);
 	const waitToolConfig = resolveWaitToolConfig(config.waitTool);
 	const asyncByDefault = resolveAsyncByDefault(config);
 	const fleetViewEnabled = config.fleetView !== false;

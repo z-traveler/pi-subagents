@@ -98,7 +98,7 @@ import { buildTimeoutRecoverySummary, collectTrackedMutationEvidence, snapshotTr
 import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelStep, validateDynamicCollection } from "../shared/dynamic-fanout.ts";
 import { claimRunFanoutBatch, getRunFanoutBudgetSnapshot } from "../shared/run-fanout-budget.ts";
 import { nestedSummaryFromAsyncStatus, projectNestedEvents, resolveNestedAsyncDir, writeNestedEvent } from "../shared/nested-events.ts";
-import { classifyModelFailure, classifyRetryEffects, formatModelAttemptNote, formatSubagentModelVerificationError, isContextOverflow, isRetryableModelFailureAttempt, recordRetryableModelFailure, selectModelFailover } from "../shared/model-fallback.ts";
+import { classifyModelFailure, classifyRetryEffects, formatModelAttemptNote, formatSubagentModelVerificationError, isContextOverflow, selectModelFailover } from "../shared/model-fallback.ts";
 import { markProcessTerminalCandidateLeaseRelease, processTerminalPath, writeProcessTerminalCandidate, type ProcessTerminalCandidate } from "./process-terminal.ts";
 import { createSteeringStatus, recordSteeringRequest, steeringStatus, terminalSteeringNoticeState, unconsumedSteerReason, updateSteeringTarget } from "./steering.ts";
 import { PROMPT_REDACTED, detectSubagentError, extractTextFromContent, extractToolArgsPreview, formatEmptyTerminalAssistantResponseError, getAgentDir, getFinalOutput, hasEmptyTerminalAssistantResponse, readStatus } from "../../shared/utils.ts";
@@ -1554,8 +1554,7 @@ export async function runSingleStepInner(
 		if (recovery.diagnostic) {
 			finalResult.abortRecoveryDiagnostic = recovery.diagnostic;
 		}
-		const retryableModelFailure = isRetryableModelFailureAttempt({ error, messages: run.messages, toolCount: run.toolCount });
-		if (retryableModelFailure && !step.modelRouting) recordRetryableModelFailure(settledCandidate, error);
+
 		if (isContextOverflow(error)) {
 			contextOverflow = true;
 			break modelLoop;

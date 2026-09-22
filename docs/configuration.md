@@ -95,18 +95,6 @@ Session Fast is off by default. `/fast` toggles it; `/fast on`, `/fast off`, and
 
 This setting is independent of the per-launch `fast: true` option and the semantic `subagents.modelPools.fast` pool. `/fast off` does not disable a child's separately configured Launch Fast option.
 
-## `modelExclusions`
-
-```json
-{
-  "modelExclusions": {
-    "defaultTtlMs": 300000
-  }
-}
-```
-
-Controls the duration, in milliseconds, for model exclusions. The default is `86400000` (24 hours), and the maximum is `8000000000000000` so generated expiry timestamps remain valid JavaScript dates. The extension applies this value when it starts or reloads. A lower configured value shortens active cached exclusions from their original `recordedAt`; it never extends an existing expiry. Authentication-related exclusions are ignored when Pi's `auth.json` was modified after the exclusion was recorded; other exclusion types are unaffected. Launches also warn when a candidate is skipped, including the cached reason and expiry. `PI_MODEL_EXCLUSIONS_PATH` changes the exclusion-store path but does not change this TTL.
-
 ## `toolDescriptionMode`
 
 ```json

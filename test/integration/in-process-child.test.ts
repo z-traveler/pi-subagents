@@ -374,7 +374,6 @@ describe("in-process foreground child", () => {
 		const order: string[] = [];
 		let firstProbeRelease: (() => void) | undefined;
 		let probeCount = 0;
-		const probeNotices: string[] = [];
 		const factory: ChildSessionFactory = {
 			supportsModelPerformanceProbes: true,
 			async create(launch) {
@@ -436,7 +435,6 @@ describe("in-process foreground child", () => {
 			modelCandidates: candidates,
 			modelRouting: routing,
 			modelPerformance: performanceConfig,
-			onModelPerformanceProbe: (message) => probeNotices.push(message),
 			childSessionFactory: factory,
 		});
 		assert.equal(first.exitCode, 0, first.error);
@@ -444,8 +442,8 @@ describe("in-process foreground child", () => {
 		assert.equal(first.finalOutput, `completed by ${candidates[0]}`);
 		await waitFor(() => firstProbeRelease !== undefined);
 		assert.equal(order[0], `prompt primary ${candidates[0]}`);
-		assert.match(first.progress?.recentOutput.join("\n") ?? "", /benchmarking gateway\/probed in the background/);
 		assert.doesNotMatch(first.finalOutput ?? "", /model probe|benchmarking/);
+		assert.doesNotMatch(first.progress?.recentOutput.join("\n") ?? "", /model probe|benchmarking/);
 
 		const probeLaunch = launches.find((launch) => launch.maxOutputTokens !== undefined);
 		assert.ok(probeLaunch);
@@ -461,8 +459,6 @@ describe("in-process foreground child", () => {
 
 		firstProbeRelease!();
 		await waitFor(() => store.read(cacheKey, performanceConfig.cacheTtlMs).some(({ candidate }) => candidate === candidates[1]));
-		assert.match(first.progress?.recentOutput.join("\n") ?? "", /gateway\/probed: .*token\/s/);
-		assert.ok(probeNotices.some((message) => /gateway\/probed: .*token\/s/.test(message)), "late probe results must use the human-only notification channel");
 
 		const second = await runSync(tempDir, makeAgentConfigs(["echo"]), "echo", "Task", {
 			runId: "foreground-cold-probe-second",

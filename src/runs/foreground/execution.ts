@@ -77,8 +77,6 @@ import {
 	formatSubagentModelVerificationError,
 	formatModelAttemptNote,
 	isContextOverflow,
-	isRetryableModelFailureAttempt,
-	recordRetryableModelFailure,
 	selectModelFailover,
 } from "../shared/model-fallback.ts";
 import { resolveModelSelection } from "../shared/model-resolution.ts";
@@ -122,10 +120,7 @@ import {
 	rankModelCandidates,
 	type ModelPerformanceSwitch,
 } from "../shared/model-performance.ts";
-import {
-	type ModelPerformanceProbeResult,
-	warmModelPerformanceCache,
-} from "../shared/model-performance-probe.ts";
+import { warmModelPerformanceCache } from "../shared/model-performance-probe.ts";
 import { createChildSessionModelPerformanceProbeExecutor } from "../shared/child-session-model-performance-probe.ts";
 
 const artifactOutputByResult = new WeakMap<SingleResult, string>();
@@ -248,15 +243,6 @@ function appendRecentOutput(progress: AgentProgress, lines: string[]): void {
 	if (progress.recentOutput.length > 50) {
 		progress.recentOutput.splice(0, progress.recentOutput.length - 50);
 	}
-}
-
-function formatChildModelPerformanceProbeResult(result: ModelPerformanceProbeResult): string {
-	if (result.status === "sampled") {
-		return `[model probe] ${result.candidate}: ${result.observation.ttftMs.toFixed(0)}ms first token, ${result.observation.estimatedTokensPerSecond.toFixed(1)} token/s.`;
-	}
-	if (result.status === "failed") return `[model probe] ${result.candidate} failed: ${result.error}`;
-	if (result.status === "timed-out") return `[model probe] ${result.candidate} timed out.`;
-	return `[model probe] ${result.candidate} was cancelled.`;
 }
 
 function stripAcceptanceReportsFromMessages(messages: Message[] | undefined): void {
@@ -1577,8 +1563,6 @@ async function runSingleAttempt(
 						&& !shared.attemptedModelCandidates?.includes(candidate)
 						&& !fresh.has(candidate));
 					if (probeCandidates.length > 0) {
-						appendRecentOutput(progress, [`[model probe] benchmarking ${probeCandidates.join(", ")} in the background.`]);
-						fireUpdate();
 						void warmModelPerformanceCache({
 							key: performanceKey,
 							candidates: probeCandidates,
@@ -1586,30 +1570,7 @@ async function runSingleAttempt(
 							store: performanceStore,
 							execute: createChildSessionModelPerformanceProbeExecutor(childSessions, input),
 							signal: options.signal,
-							onResult: (probeResult) => {
-								const message = formatChildModelPerformanceProbeResult(probeResult);
-								appendRecentOutput(progress, [message]);
-								fireUpdate();
-								if (!options.onUpdate || sessionSettled || lifecycleFinished) {
-									try {
-										options.onModelPerformanceProbe?.(message, probeResult.status === "sampled" ? "info" : "warning");
-									} catch {
-										// A stale human-facing observer must not affect task execution.
-									}
-								}
-							},
-						}).catch((error) => {
-							const message = `[model probe] background benchmark failed: ${error instanceof Error ? error.message : String(error)}`;
-							appendRecentOutput(progress, [message]);
-							fireUpdate();
-							if (!options.onUpdate || sessionSettled || lifecycleFinished) {
-								try {
-									options.onModelPerformanceProbe?.(message, "warning");
-								} catch {
-									// A stale human-facing observer must not affect task execution.
-								}
-							}
-						});
+						}).catch(() => {});
 					}
 				}
 				await primaryPrompt;
@@ -1997,7 +1958,6 @@ async function runSyncCompletionInner(
 			scope: options.modelScope,
 			primaryModelFromParent: options.modelOverrideFromParent,
 			origin: options.modelOrigin ?? (options.modelOverrideFromParent ? "inherited" : "configured"),
-			retainPrimaryDespiteCachedExclusion: Boolean(options.modelOverride ?? agent.model) || options.modelOrigin === "inherited",
 		},
 	);
 	const frozenCandidates = applyThinkingToModelCandidates(
@@ -2212,8 +2172,7 @@ async function runSyncCompletionInner(
 		if (recovery.diagnostic) {
 			attemptResult.error = attemptResult.error ? `${attemptResult.error}\n${recovery.diagnostic}` : recovery.diagnostic;
 		}
-		const retryableModelFailure = isRetryableModelFailureAttempt({ error: attemptResult.error, messages: attemptResult.messages, toolCount: attemptResult.progressSummary?.toolCount });
-		if (retryableModelFailure && !options.modelRouting) recordRetryableModelFailure(attemptResult.model ?? candidate, attemptResult.error);
+
 		if (isContextOverflow(attemptResult.error)) {
 			attemptResult.contextOverflow = true;
 			attemptNotes.push(`[fallback] ${attempt.model} failed: context overflow — the input exceeds this model's context window. Reduce the task input or use a model with a larger context window.`);

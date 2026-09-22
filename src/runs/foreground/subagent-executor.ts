@@ -4145,9 +4145,6 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 			parentSessionId: ctx.sessionManager.getSessionId() ?? undefined,
 			requiredExtensions,
 			childRuntime: deps.childRuntime,
-			onModelPerformanceProbe: ctx.hasUI
-				? (message, level) => ctx.ui.notify(message, level)
-				: undefined,
 			sessionFastMode: currentSessionFastMode(deps),
 			onChildSession: (controls) => { childSessionControls = controls; },
 			context: data.contextPolicy.contextForAgent(params.agent!),
