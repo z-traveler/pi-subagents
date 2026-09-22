@@ -1266,7 +1266,7 @@ export default function() {
 			lastForegroundControlId: null,
 		};
 		const executor = createSubagentExecutor!({
-			pi: { events: createEventBus(), getSessionName: () => undefined },
+			pi: { events: createEventBus(), getSessionName: () => undefined, sendMessage() {} },
 			state,
 			config: {},
 			asyncByDefault: false,
