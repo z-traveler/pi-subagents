@@ -536,7 +536,7 @@ export function resolveModelRouting(input: ResolveModelRoutingInput): ModelRouti
 			input.agentFallbackModels,
 			input.availableModels,
 			input.preferredProvider,
-			{ scope: input.modelScope, origin: input.modelOrigin },
+			{ scope: input.modelScope, origin: input.modelOrigin, ignoreCachedExclusions: Boolean(input.explicitModel ?? input.agentModel) },
 		),
 		...(requestedModelClass ? { requestedModelClass, modelClassSource } : {}),
 	};
@@ -591,7 +591,6 @@ export function buildModelCandidates(
 	};
 	if (origin === "explicit" && primaryModel) {
 		const normalized = resolveRequiredSubagentModelCandidate(primaryModel.trim(), availableModels, preferredProvider);
-		throwForExplicitModelExclusion(normalized);
 		enforceModelScopes(normalized, scopes, "explicit", options?.onWarn);
 		primaryModel = normalized;
 	}
@@ -622,7 +621,7 @@ export function buildModelCandidates(
 		seen.add(normalized);
 		candidates.push(normalized);
 	}
-	const resolved = options?.ignoreCachedExclusions
+	const resolved = options?.ignoreCachedExclusions || origin === "explicit"
 		? candidates
 		: filterFallbackCandidates(candidates, {
 			onExcluded: warnCachedExclusion,

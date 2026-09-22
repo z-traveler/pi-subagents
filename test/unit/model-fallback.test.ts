@@ -384,23 +384,23 @@ describe("model fallback helpers", () => {
 		);
 	});
 
-	it("keeps explicit stale model-not-found exclusions strict", () => {
+	it("allows an explicit model to run despite a stale model-not-found exclusion", () => {
 		recordModelFailure({
 			modelId: "gpt-5-mini",
 			provider: "openai",
 			reason: 'Model "openai/gpt-5-mini" not found. Use --list-models to see available models.',
 		});
-		assert.throws(
-			() => buildModelCandidates("openai/gpt-5-mini", ["anthropic/claude-sonnet-4"], availableModels, undefined, { origin: "explicit" }),
-			/Requested subagent model 'openai\/gpt-5-mini' is excluded and cannot be replaced by a fallback/,
+		assert.deepEqual(
+			buildModelCandidates("openai/gpt-5-mini", ["anthropic/claude-sonnet-4"], availableModels, undefined, { origin: "explicit" }),
+			["openai/gpt-5-mini", "anthropic/claude-sonnet-4"],
 		);
 	});
 
-	it("keeps an explicit cached-excluded primary strict even when fallbacks exist", () => {
+	it("allows an explicit cached-excluded primary to launch before runtime failure handling", () => {
 		recordModelFailure({ modelId: "gpt-5-mini", provider: "openai", reason: "sk-secret-token-xyz" });
-		assert.throws(
-			() => buildModelCandidates("openai/gpt-5-mini", ["anthropic/claude-sonnet-4"], availableModels, undefined, { origin: "explicit" }),
-			/Requested subagent model 'openai\/gpt-5-mini' is excluded and cannot be replaced by a fallback/,
+		assert.deepEqual(
+			buildModelCandidates("openai/gpt-5-mini", ["anthropic/claude-sonnet-4"], availableModels, undefined, { origin: "explicit" }),
+			["openai/gpt-5-mini", "anthropic/claude-sonnet-4"],
 		);
 	});
 
