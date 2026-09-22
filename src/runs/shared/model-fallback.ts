@@ -536,7 +536,7 @@ export function resolveModelRouting(input: ResolveModelRoutingInput): ModelRouti
 			input.agentFallbackModels,
 			input.availableModels,
 			input.preferredProvider,
-			{ scope: input.modelScope, origin: input.modelOrigin, ignoreCachedExclusions: Boolean(input.explicitModel ?? input.agentModel) },
+			{ scope: input.modelScope, origin: input.modelOrigin, ignoreCachedExclusions: Boolean(input.explicitModel ?? input.agentModel) || input.modelOrigin === "inherited" },
 		),
 		...(requestedModelClass ? { requestedModelClass, modelClassSource } : {}),
 	};
