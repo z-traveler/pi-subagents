@@ -1,6 +1,6 @@
 import { splitKnownThinkingSuffix as splitThinkingSuffix, type ModelInfo as AvailableModelInfo } from "../../shared/model-info.ts";
 import type { ModelRoutingSnapshot, Usage } from "../../shared/types.ts";
-import { filterFallbackCandidates, findModelExclusion, parseModelKey, recordModelFailure } from "./model-exclusions.ts";
+import { filterFallbackCandidates, parseModelKey, recordModelFailure, type ModelExclusion } from "./model-exclusions.ts";
 import { checkModelScope, type ModelScopeCheckRule, type ModelScopeViolation, type ModelSource } from "./model-scope.ts";
 import { redactSecretValues } from "./permissions.ts";
 import { modelPoolDigest, type ModelPools, type ModelPoolSources } from "../../shared/model-routing.ts";
@@ -308,7 +308,7 @@ function formatModelExclusionExpiry(expiresAt: number): string {
 	return Number.isNaN(date.getTime()) ? "unknown" : date.toISOString();
 }
 
-function formatExcludedCandidateEvidence(candidate: string, exclusion: NonNullable<ReturnType<typeof findModelExclusion>>): string {
+function formatExcludedCandidateEvidence(candidate: string, exclusion: Readonly<ModelExclusion>): string {
 	const { provider, modelId } = parseModelKey(candidate);
 	const displayCandidate = sanitizeModelExclusionDiagnostic(candidate, "unknown");
 	const displayModel = sanitizeModelExclusionDiagnostic(modelId, "unknown");
@@ -330,17 +330,9 @@ function isCurrentRegistryModel(candidate: string, availableModels: AvailableMod
 	return availableModels.some((entry) => entry.fullId === baseModel);
 }
 
-function ignoreStaleModelUnavailableExclusion(candidate: string, exclusion: NonNullable<ReturnType<typeof findModelExclusion>>, availableModels: AvailableModelInfo[] | undefined): boolean {
+function ignoreStaleModelUnavailableExclusion(candidate: string, exclusion: Readonly<ModelExclusion>, availableModels: AvailableModelInfo[] | undefined): boolean {
 	const reason = exclusion.reason ?? "";
 	return MODEL_UNAVAILABLE_EXCLUSION_PATTERNS.some((pattern) => pattern.test(reason)) && isCurrentRegistryModel(candidate, availableModels);
-}
-
-function throwForExplicitModelExclusion(model: string): void {
-	const exclusion = findModelExclusion(model);
-	if (!exclusion) return;
-	const reason = redactSecretValues((exclusion.reason ?? "runtime-failure").replace(/[\u0000-\u001f\u007f]+/g, " ")).slice(0, 240);
-	const expiry = Number.isFinite(exclusion.expiresAt) ? `; expires: ${new Date(exclusion.expiresAt).toISOString()}` : "";
-	throw new Error(`Requested subagent model '${model}' is excluded and cannot be replaced by a fallback (reason: ${reason}${expiry}).`);
 }
 
 /**
@@ -432,6 +424,8 @@ export interface BuildModelCandidatesOptions {
 	origin?: ModelOrigin;
 	/** Model-class candidates are independent per-run choices, not cross-run cooldown targets. */
 	ignoreCachedExclusions?: boolean;
+	/** Keep a configured or inherited primary candidate while filtering cached fallback exclusions. */
+	retainPrimaryDespiteCachedExclusion?: boolean;
 }
 
 export type ModelClassSource = "per-run" | "agent-override" | "agent-frontmatter";
@@ -535,7 +529,7 @@ export function resolveModelRouting(input: ResolveModelRoutingInput): ModelRouti
 			input.agentFallbackModels,
 			input.availableModels,
 			input.preferredProvider,
-			{ scope: input.modelScope, origin: input.modelOrigin, ignoreCachedExclusions: Boolean(input.explicitModel ?? input.agentModel) || input.modelOrigin === "inherited" },
+			{ scope: input.modelScope, origin: input.modelOrigin, retainPrimaryDespiteCachedExclusion: Boolean(input.explicitModel ?? input.agentModel) || input.modelOrigin === "inherited" },
 		),
 		...(requestedModelClass ? { requestedModelClass, modelClassSource } : {}),
 	};
@@ -578,10 +572,10 @@ export function buildModelCandidates(
 	if (!primaryModel) throwForUnresolvedEnforcedInheritScope(options?.scope, true);
 	const origin = options?.origin ?? (options?.primaryModelFromParent ? "inherited" : "configured");
 	const scopes = configuredScopes(options?.scope);
-	type ExcludedCandidate = { candidate: string; exclusion: NonNullable<ReturnType<typeof findModelExclusion>> };
+	type ExcludedCandidate = { candidate: string; exclusion: Readonly<ModelExclusion> };
 	const excludedCandidates: ExcludedCandidate[] = [];
 	let excludedCandidateCount = 0;
-	const warnCachedExclusion = (candidate: string, exclusion: NonNullable<ReturnType<typeof findModelExclusion>>) => {
+	const warnCachedExclusion = (candidate: string, exclusion: Readonly<ModelExclusion>) => {
 		excludedCandidateCount++;
 		if (excludedCandidates.length < MODEL_EXCLUSION_DIAGNOSTIC_MAX_ENTRIES) excludedCandidates.push({ candidate, exclusion });
 		const displayCandidate = sanitizeModelExclusionDiagnostic(candidate, "unknown");
@@ -620,12 +614,16 @@ export function buildModelCandidates(
 		seen.add(normalized);
 		candidates.push(normalized);
 	}
-	const resolved = options?.ignoreCachedExclusions || origin === "explicit"
+	const filterOptions = {
+		onExcluded: warnCachedExclusion,
+		ignoreExclusion: (candidate: string, exclusion: Readonly<ModelExclusion>) => ignoreStaleModelUnavailableExclusion(candidate, exclusion, availableModels),
+	};
+	const protectPrimary = options?.retainPrimaryDespiteCachedExclusion === true || origin === "explicit";
+	const resolved = options?.ignoreCachedExclusions
 		? candidates
-		: filterFallbackCandidates(candidates, {
-			onExcluded: warnCachedExclusion,
-			ignoreExclusion: (candidate, exclusion) => ignoreStaleModelUnavailableExclusion(candidate, exclusion, availableModels),
-		});
+		: protectPrimary && candidates.length > 0
+			? [candidates[0]!, ...filterFallbackCandidates(candidates.slice(1), filterOptions)]
+			: filterFallbackCandidates(candidates, filterOptions);
 	if (resolved.length === 0) {
 		if (skippedPrimary) resolveRequiredSubagentModelCandidate(skippedPrimary, availableModels, preferredProvider);
 		if (candidates.length === 0 && skippedFallback) resolveRequiredSubagentModelCandidate(skippedFallback, availableModels, preferredProvider);

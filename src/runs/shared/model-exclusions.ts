@@ -74,7 +74,6 @@ function invalidateAuthExclusions(): void {
  * @param ms Duration in milliseconds. Must be finite and positive.
  * @returns Nothing.
  */
-// TEST:test/unit/model-exclusions.test.ts[model exclusions — TTL expiry]
 export function setDefaultTTL(ms: number, options?: { shortenExisting?: boolean }): void {
 	if (!Number.isFinite(ms) || ms <= 0 || ms > MAX_MODEL_EXCLUSION_TTL_MS) {
 		throw new Error(`Default model exclusion TTL must be a finite positive number no greater than ${MAX_MODEL_EXCLUSION_TTL_MS}.`);
@@ -200,10 +199,8 @@ function deduplicate(items: ModelExclusion[]): ModelExclusion[] {
 }
 
 /**
- * Record a model failure as a temporary exclusion. While the exclusion is
- * active, {@link isExcluded} returns true for the model (or for every model of
- * the provider when modelId is omitted), and {@link filterFallbackCandidates}
- * removes matching candidates from fallback lists.
+ * Record a model failure as a temporary exclusion. Active entries are removed
+ * from fallback lists by {@link filterFallbackCandidates}.
  */
 export function recordModelFailure(options: RecordModelFailureOptions): void {
 	ensureLoaded();
@@ -263,28 +260,6 @@ function entryMatches(entry: ModelExclusion, candidateModelId: string, candidate
 }
 
 /**
- * Whether a model (or its provider) is currently excluded.
- */
-export function isExcluded(modelId: string, provider: string): boolean {
-	ensureLoaded();
-	invalidateAuthExclusions();
-	return exclusions.some((entry) => entryMatches(entry, modelId, provider, Date.now()));
-}
-
-/**
- * Return the active exclusion matching a full model id, if any.
- *
- * The caller uses this for hard-fail diagnostics; fallback filtering should
- * continue to use {@link filterFallbackCandidates}.
- */
-export function findModelExclusion(fullId: string, now = Date.now()): Readonly<ModelExclusion> | undefined {
-	ensureLoaded();
-	invalidateAuthExclusions();
-	const { provider, modelId } = parseModelKey(fullId);
-	return exclusions.find((entry) => entryMatches(entry, modelId, provider, now));
-}
-
-/**
  * Number of live (non-expired) exclusions.
  */
 export function getExcludedCount(): number {
@@ -300,8 +275,8 @@ export function getExcludedCount(): number {
  * stripped before parsing, and the modelId itself may contain slashes
  * (e.g. `openrouter/google/gemini-flash`). The first `/`-segment is the
  * provider; everything after is the modelId. This MUST stay in lock-step with
- * the matching inside {@link isExcluded} so that a failure recorded via
- * {@link recordModelFailure} is later recognised by the candidate filter.
+ * the matching inside {@link filterFallbackCandidates} so that a failure
+ * recorded via {@link recordModelFailure} is later recognised by the filter.
  */
 export function parseModelKey(fullId: string): { provider?: string; modelId: string } {
 	const base = splitKnownThinkingSuffix(fullId).baseModel;
