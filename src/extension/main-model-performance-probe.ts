@@ -1,5 +1,5 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
-import { normalizeContext, type Model, type ProviderHeaders, type SimpleStreamOptions, type ThinkingLevel } from "@earendil-works/pi-ai";
+import { type Model, type ProviderHeaders, type SimpleStreamOptions, type ThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import {
@@ -19,6 +19,15 @@ interface ProbeAuth {
 	apiKey?: string;
 	headers?: ProviderHeaders;
 	env?: Record<string, string>;
+}
+
+function normalizeProbeContext(prompt: string): Parameters<StreamFn>[1] {
+	return {
+		messages: [
+			{ role: "system", content: "Generate only the requested probe text. Do not call tools or explain the task.", timestamp: 0 },
+			{ role: "user", content: prompt, timestamp: Date.now() },
+		],
+	} as Parameters<StreamFn>[1];
 }
 
 function splitProviderModel(value: string): { provider: string; id: string } | undefined {
@@ -69,11 +78,7 @@ export function createPiModelPerformanceProbeExecutor(
 			? registeredProvider.streamSimple
 			: streamSimple);
 		const sessionId = context.sessionManager.getSessionId();
-		const requestContext = normalizeContext({
-			systemPrompt: "Generate only the requested probe text. Do not call tools or explain the task.",
-			messages: [{ role: "user", content: execution.prompt, timestamp: Date.now() }],
-			tools: [],
-		});
+		const requestContext = normalizeProbeContext(execution.prompt);
 		const streamOptions: SimpleStreamOptions = {
 			signal: execution.signal,
 			maxTokens: Math.min(execution.maxEstimatedTokens, model.maxTokens),

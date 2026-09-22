@@ -1997,7 +1997,7 @@ async function runSyncCompletionInner(
 			scope: options.modelScope,
 			primaryModelFromParent: options.modelOverrideFromParent,
 			origin: options.modelOrigin ?? (options.modelOverrideFromParent ? "inherited" : "configured"),
-			ignoreCachedExclusions: Boolean(options.modelOverride ?? agent.model),
+			retainPrimaryDespiteCachedExclusion: Boolean(options.modelOverride ?? agent.model) || options.modelOrigin === "inherited",
 		},
 	);
 	const frozenCandidates = applyThinkingToModelCandidates(
@@ -2213,7 +2213,7 @@ async function runSyncCompletionInner(
 			attemptResult.error = attemptResult.error ? `${attemptResult.error}\n${recovery.diagnostic}` : recovery.diagnostic;
 		}
 		const retryableModelFailure = isRetryableModelFailureAttempt({ error: attemptResult.error, messages: attemptResult.messages, toolCount: attemptResult.progressSummary?.toolCount });
-		if (retryableModelFailure) recordRetryableModelFailure(attemptResult.model ?? candidate, attemptResult.error);
+		if (retryableModelFailure && !options.modelRouting) recordRetryableModelFailure(attemptResult.model ?? candidate, attemptResult.error);
 		if (isContextOverflow(attemptResult.error)) {
 			attemptResult.contextOverflow = true;
 			attemptNotes.push(`[fallback] ${attempt.model} failed: context overflow — the input exceeds this model's context window. Reduce the task input or use a model with a larger context window.`);
