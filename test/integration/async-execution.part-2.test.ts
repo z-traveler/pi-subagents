@@ -2155,7 +2155,8 @@ syncBuiltinESMExports();
 		assert.equal(payload.success, false);
 		assert.match(payload.results[0].error ?? "", /^bash failed \(exit 1\)/);
 		assert.match(payload.results[0].error ?? "", /timed out/i);
-		assert.equal("modelAttempts" in payload.results[0], false);
+		assert.equal(Array.isArray(payload.results[0].modelAttempts), true);
+		assert.equal(payload.results[0].modelAttempts.length, 1);
 		assert.equal(mockPi.callCount(), 1);
 	});
 
