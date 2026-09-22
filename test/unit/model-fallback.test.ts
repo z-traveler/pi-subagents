@@ -18,7 +18,7 @@ import {
 	selectModelFailover,
 	resolveSubagentModelOverride,
 } from "../../src/runs/shared/model-fallback.ts";
-import { clearExclusions, findModelExclusion, getExcludedCount, recordModelFailure } from "../../src/runs/shared/model-exclusions.ts";
+import { clearExclusions, getExcludedCount, recordModelFailure } from "../../src/runs/shared/model-exclusions.ts";
 import { resolveModelScopesForAgent } from "../../src/runs/shared/model-scope.ts";
 
 beforeEach(() => clearExclusions());
@@ -231,7 +231,6 @@ describe("model fallback helpers", () => {
 		assert.equal(isRetryableModelFailureAttempt({ error, messages, toolCount: 0 }), true);
 		assert.equal(isRetryableModelFailureAttempt({ error, messages, toolCount: 1 }), false);
 		recordRetryableModelFailure(model, error);
-		assert.equal(findModelExclusion(model), undefined);
 		assert.equal(getExcludedCount(), 0);
 		assert.deepEqual(buildModelCandidates(model, undefined, undefined), [model]);
 	});
@@ -252,7 +251,6 @@ describe("model fallback helpers", () => {
 	it("still caches rate limits that mention numeric request quotas", () => {
 		const error = "rate limit exceeded: 400 requests per minute";
 		recordRetryableModelFailure("openai/gpt-5-mini", error);
-		assert.equal(findModelExclusion("openai/gpt-5-mini")?.reason, error);
 		assert.equal(getExcludedCount(), 1);
 	});
 
@@ -264,7 +262,6 @@ describe("model fallback helpers", () => {
 			clearExclusions();
 			assert.equal(isContextOverflow(error), false);
 			recordRetryableModelFailure("openai/gpt-5-mini", error);
-			assert.equal(findModelExclusion("openai/gpt-5-mini")?.reason, error);
 			assert.equal(getExcludedCount(), 1);
 		}
 	});
@@ -359,6 +356,21 @@ describe("model fallback helpers", () => {
 		assert.deepEqual(
 			buildModelCandidates("openai/gpt-5-mini", ["anthropic/claude-sonnet-4"], availableModels, undefined, { origin: "explicit" }),
 			["openai/gpt-5-mini", "anthropic/claude-sonnet-4"],
+		);
+	});
+
+	it("retains a pinned primary while filtering an excluded fallback", () => {
+		recordModelFailure({ modelId: "claude-sonnet-4", provider: "anthropic", reason: "quota exceeded" });
+		assert.deepEqual(
+			buildModelCandidates("openai/gpt-5-mini", ["anthropic/claude-sonnet-4"], availableModels, undefined, { origin: "explicit" }),
+			["openai/gpt-5-mini"],
+		);
+		assert.deepEqual(
+			buildModelCandidates("openai/gpt-5-mini", ["anthropic/claude-sonnet-4"], availableModels, undefined, {
+				origin: "configured",
+				retainPrimaryDespiteCachedExclusion: true,
+			}),
+			["openai/gpt-5-mini"],
 		);
 	});
 
