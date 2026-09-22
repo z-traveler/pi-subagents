@@ -2601,8 +2601,6 @@ export interface RunSyncOptions {
 	allowIntercomDetach?: boolean;
 	intercomEvents?: IntercomEventBus;
 	onUpdate?: (r: import("@earendil-works/pi-agent-core").AgentToolResult<Details>) => void;
-	/** Human-only notification channel for model probe results; never enters the child or parent model context. */
-	onModelPerformanceProbe?: (message: string, level: "info" | "warning") => void;
 	/** Internal structured-delegation transport optimization: skip unchanged live snapshots. */
 	suppressUnchangedDelegationUpdates?: boolean;
 	onControlEvent?: (event: ControlEvent) => void;
@@ -2725,11 +2723,6 @@ export interface ScheduledRunsConfig {
 	storeRoot?: string;
 }
 
-export interface ModelExclusionsConfig {
-	/** Default duration in milliseconds. A lower configured value also shortens active cached exclusions. */
-	defaultTtlMs?: number;
-}
-
 export interface SessionFastModeConfig {
 	/** Exact provider-independent model IDs eligible for the priority service tier. */
 	models?: string[];
@@ -2808,8 +2801,6 @@ export interface ExtensionConfig {
 	programStatus?: boolean;
 	/** Add a short `active_subagents` system prompt section listing this session's active background runs. Defaults to false. */
 	activeRunsPrompt?: boolean;
-	/** Configure the process-wide TTL policy for persisted model exclusions. */
-	modelExclusions?: ModelExclusionsConfig;
 	/** Configure root-session Fast routing by exact provider-independent model ID. */
 	fastMode?: SessionFastModeConfig;
 	/** Exact provider/model candidates mapped to operator-declared equivalent response IDs. Empty arrays add no accepted IDs. */

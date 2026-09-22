@@ -4506,9 +4506,6 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 			parentSessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
 			requiredExtensions,
 			childRuntime: deps.childRuntime,
-			onModelPerformanceProbe: ctx.hasUI
-				? (message, level) => ctx.ui.notify(message, level)
-				: undefined,
 			sessionFastMode: currentSessionFastMode(deps),
 			onChildSession: (controls) => {
 				childSessionControls = controls;

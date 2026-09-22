@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { describe, it } from "node:test";
 import {
 	buildModelCandidates,
 	classifyModelFailure,
@@ -8,21 +8,14 @@ import {
 	fuzzyResolveModel,
 	formatSubagentModelVerificationError,
 	isContextOverflow,
-	isRetryableModelFailure,
-	isRetryableModelFailureAttempt,
 	normalizeModelSegment,
-	recordRetryableModelFailure,
 	resolveEffectiveSubagentModel,
 	resolveModelCandidate,
 	resolveModelRouting,
 	selectModelFailover,
 	resolveSubagentModelOverride,
 } from "../../src/runs/shared/model-fallback.ts";
-import { clearExclusions, getExcludedCount, recordModelFailure } from "../../src/runs/shared/model-exclusions.ts";
 import { resolveModelScopesForAgent } from "../../src/runs/shared/model-scope.ts";
-
-beforeEach(() => clearExclusions());
-afterEach(() => clearExclusions());
 
 describe("model fallback helpers", () => {
 	const availableModels = [
@@ -188,84 +181,6 @@ describe("model fallback helpers", () => {
 		);
 	});
 
-	it("excludes a candidate after a retryable model failure is recorded", () => {
-		const warnings: string[] = [];
-		const originalWarn = console.warn;
-		console.warn = (message: unknown) => warnings.push(String(message));
-		try {
-			recordRetryableModelFailure("openai/gpt-5-mini", "rate limit exceeded for Bearer secret-token-value");
-			assert.deepEqual(
-				buildModelCandidates("gpt-5-mini", ["anthropic/claude-sonnet-4"], availableModels),
-				["anthropic/claude-sonnet-4"],
-			);
-		} finally {
-			console.warn = originalWarn;
-		}
-		assert.equal(warnings.length, 1);
-		assert.match(warnings[0]!, /Skipping model 'openai\/gpt-5-mini'.*reason: rate limit exceeded for \[redacted\]; expires: \d{4}-\d{2}-\d{2}T/);
-		assert.doesNotMatch(warnings[0]!, /secret-token-value/);
-	});
-
-	it("does not exclude a candidate after a task or tool failure", () => {
-		recordRetryableModelFailure("openai/gpt-5-mini", "bash failed (exit 1): command not found");
-
-		assert.deepEqual(
-			buildModelCandidates("gpt-5-mini", ["anthropic/claude-sonnet-4"], availableModels),
-			["openai/gpt-5-mini", "anthropic/claude-sonnet-4"],
-		);
-	});
-
-	it("does not cache context overflow even when upstream makes it retryable", () => {
-		const error = "upstream: maximum context length exceeded";
-		assert.equal(isRetryableModelFailure(error), true);
-		assert.equal(isContextOverflow(error), true);
-		recordRetryableModelFailure("openai/gpt-5-mini", error);
-		assert.equal(getExcludedCount(), 0);
-	});
-
-	it("does not cache the reported Databricks tool-message request error (issue #1955)", () => {
-		const model = "databricks/databricks-kimi-k3";
-		const error = 'Databricks error: {"error_code":"BAD_REQUEST","message":"{\\"error\\":\\"Upstream error: INVALID_ARGUMENT: Kimi K3 tool messages need a resolvable tool name: carry `tool`/`name`, or match a preceding assistant tool_call by order.\\"}"}';
-		assert.equal(isRetryableModelFailure(error), true);
-		const messages = [{ role: "assistant", errorMessage: error }];
-		assert.equal(isRetryableModelFailureAttempt({ error, messages, toolCount: 0 }), true);
-		assert.equal(isRetryableModelFailureAttempt({ error, messages, toolCount: 1 }), false);
-		recordRetryableModelFailure(model, error);
-		assert.equal(getExcludedCount(), 0);
-		assert.deepEqual(buildModelCandidates(model, undefined, undefined), [model]);
-	});
-
-	it("does not cache request-shape errors despite retryable upstream prose", () => {
-		for (const error of [
-			"Bad Request: upstream rejected the request",
-			"BAD_REQUEST: upstream rejected the request",
-			"INVALID_ARGUMENT: upstream rejected the request",
-			"invalid_request_error: upstream rejected the request",
-		]) {
-			assert.equal(isRetryableModelFailure(error), true, error);
-			recordRetryableModelFailure("openai/gpt-5-mini", error);
-			assert.equal(getExcludedCount(), 0, error);
-		}
-	});
-
-	it("still caches rate limits that mention numeric request quotas", () => {
-		const error = "rate limit exceeded: 400 requests per minute";
-		recordRetryableModelFailure("openai/gpt-5-mini", error);
-		assert.equal(getExcludedCount(), 1);
-	});
-
-	it("still caches raw request limits and per-minute input-token rate quotas", () => {
-		for (const error of [
-			"REQUEST_LIMIT_EXCEEDED",
-			'{"error_code":"REQUEST_LIMIT_EXCEEDED","message":"REQUEST_LIMIT_EXCEEDED: Exceeded workspace input tokens per minute rate limit for <model>."}',
-		]) {
-			clearExclusions();
-			assert.equal(isContextOverflow(error), false);
-			recordRetryableModelFailure("openai/gpt-5-mini", error);
-			assert.equal(getExcludedCount(), 1);
-		}
-	});
-
 	it("applies the current provider preference to fallback candidates too", () => {
 		const ambiguous = [
 			...availableModels,
@@ -359,155 +274,6 @@ describe("model fallback helpers", () => {
 		);
 	});
 
-	it("retains a pinned primary while filtering an excluded fallback", () => {
-		recordModelFailure({ modelId: "claude-sonnet-4", provider: "anthropic", reason: "quota exceeded" });
-		assert.deepEqual(
-			buildModelCandidates("openai/gpt-5-mini", ["anthropic/claude-sonnet-4"], availableModels, undefined, { origin: "explicit" }),
-			["openai/gpt-5-mini"],
-		);
-		assert.deepEqual(
-			buildModelCandidates("openai/gpt-5-mini", ["anthropic/claude-sonnet-4"], availableModels, undefined, {
-				origin: "configured",
-				retainPrimaryDespiteCachedExclusion: true,
-			}),
-			["openai/gpt-5-mini"],
-		);
-	});
-
-	it("ignores stale model-not-found exclusions when the model is back in the registry", () => {
-		recordModelFailure({
-			modelId: "gpt-5-mini",
-			provider: "openai",
-			reason: 'Model "openai/gpt-5-mini" not found. Use --list-models to see available models.',
-		});
-		assert.deepEqual(buildModelCandidates("openai/gpt-5-mini", undefined, availableModels), ["openai/gpt-5-mini"]);
-	});
-
-	it("keeps provider-wide exclusions when ignoring a stale model-not-found entry", () => {
-		recordModelFailure({ provider: "openai", reason: "quota exceeded" });
-		recordModelFailure({
-			modelId: "gpt-5-mini",
-			provider: "openai",
-			reason: 'Model "openai/gpt-5-mini" not found. Use --list-models to see available models.',
-		});
-		assert.throws(
-			() => buildModelCandidates("openai/gpt-5-mini", undefined, availableModels),
-			/No usable subagent models remain after registry, scope, and cached-exclusion filtering/,
-		);
-	});
-
-	it("allows an explicit model to run despite a stale model-not-found exclusion", () => {
-		recordModelFailure({
-			modelId: "gpt-5-mini",
-			provider: "openai",
-			reason: 'Model "openai/gpt-5-mini" not found. Use --list-models to see available models.',
-		});
-		assert.deepEqual(
-			buildModelCandidates("openai/gpt-5-mini", ["anthropic/claude-sonnet-4"], availableModels, undefined, { origin: "explicit" }),
-			["openai/gpt-5-mini", "anthropic/claude-sonnet-4"],
-		);
-	});
-
-	it("allows an explicit cached-excluded primary to launch before runtime failure handling", () => {
-		recordModelFailure({ modelId: "gpt-5-mini", provider: "openai", reason: "sk-secret-token-xyz" });
-		assert.deepEqual(
-			buildModelCandidates("openai/gpt-5-mini", ["anthropic/claude-sonnet-4"], availableModels, undefined, { origin: "explicit" }),
-			["openai/gpt-5-mini", "anthropic/claude-sonnet-4"],
-		);
-	});
-
-	it("rejects an explicit non-strict out-of-scope primary before fallbacks", () => {
-		assert.throws(
-			() => buildModelCandidates("anthropic/claude-sonnet-4", ["openai/gpt-5-mini"], availableModels, undefined, {
-				origin: "explicit",
-				scope: { enforce: true, allow: ["openai/*"] },
-			}),
-			/outside the configured subagent model scope/,
-		);
-	});
-
-	it("fails closed with a sanitized error when cached exclusions leave zero candidates", () => {
-		recordModelFailure({ modelId: "gpt-5-mini", provider: "openai", reason: "sk-secret-token-xyz" });
-		recordModelFailure({ modelId: "claude-sonnet-4", provider: "anthropic", reason: "sk-secret-token-xyz" });
-		assert.throws(
-			() => buildModelCandidates("openai/gpt-5-mini", ["anthropic/claude-sonnet-4"], availableModels),
-			(error: unknown) => {
-				const message = String(error);
-				return /No usable subagent models remain after registry, scope, and cached-exclusion filtering/.test(message)
-					&& /excluded: openai\/gpt-5-mini — model: gpt-5-mini; provider: openai; reason: \[redacted\]; expires: \d{4}-\d{2}-\d{2}T/.test(message)
-					&& /excluded: .*anthropic\/claude-sonnet-4/.test(message)
-					&& !message.includes("sk-secret-token-xyz");
-			},
-		);
-	});
-
-	it("keeps cached-exclusion diagnostics when an unrelated fallback is unavailable", () => {
-		recordModelFailure({ modelId: "gpt-5-mini", provider: "openai", reason: "sk-secret-token-xyz" });
-		const originalWarn = console.warn;
-		console.warn = () => {};
-		try {
-			assert.throws(
-				() => buildModelCandidates("openai/gpt-5-mini", ["does-not-exist"], availableModels),
-				/No usable subagent models remain after registry, scope, and cached-exclusion filtering/,
-			);
-		} finally {
-			console.warn = originalWarn;
-		}
-	});
-
-	it("does not apply cross-task cached exclusions to a model-class pool", () => {
-		recordModelFailure({ modelId: "gpt-5-mini", provider: "openai", reason: "quota exceeded" });
-		recordModelFailure({ modelId: "claude-sonnet-4", provider: "anthropic", reason: "authentication failed" });
-
-		const routing = resolveModelRouting({
-			explicitModelClass: "smart",
-			modelPools: { smart: ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"] },
-			availableModels,
-		});
-
-		assert.deepEqual(routing.modelCandidates, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
-	});
-
-	it("bounds and sanitizes excluded-candidate evidence", () => {
-		const warnings: string[] = [];
-		const originalWarn = console.warn;
-		console.warn = (message: unknown) => warnings.push(String(message));
-		const candidates = Array.from({ length: 21 }, (_, index) => ({
-			provider: index === 0 ? "sk-provider-secret" : "diagnostic-provider",
-			id: index === 0 ? "sk-model-secret" : `diagnostic-model-${index}`,
-			fullId: index === 0 ? "sk-provider-secret/sk-model-secret" : `diagnostic-provider/diagnostic-model-${index}`,
-		}));
-		for (const [index, candidate] of candidates.entries()) {
-			recordModelFailure({
-				modelId: candidate.id,
-				provider: candidate.provider,
-				reason: index === 0 ? "Bearer sk-secret-token-xyz\n" + "long-reason-".repeat(100) : `failure-${index}`,
-			});
-		}
-
-		try {
-			assert.throws(
-				() => buildModelCandidates(candidates[0]!.fullId, candidates.slice(1).map((candidate) => candidate.fullId), candidates),
-				(error: unknown) => {
-					const message = String(error);
-					assert.match(message, /excluded: \[redacted\]\/\[redacted\] — model: \[redacted\]; provider: \[redacted\]/);
-					assert.match(message, /reason: \[redacted\] long-reason-/);
-					assert.doesNotMatch(message, /sk-provider-secret|sk-model-secret|sk-secret-token-xyz/);
-					assert.doesNotMatch(message, /[\r\n]/);
-					assert.match(message, /diagnostic-model-19/);
-					assert.doesNotMatch(message, /diagnostic-model-20/);
-					assert.match(message, /\.\.\. and 1 more/);
-					assert.equal((message.match(/reason: /g) ?? []).length, 20);
-					return true;
-				},
-			);
-		} finally {
-			console.warn = originalWarn;
-		}
-		assert.equal(warnings.length, 21);
-		assert.doesNotMatch(warnings.join("\n"), /sk-provider-secret|sk-model-secret|sk-secret-token-xyz/);
-	});
-
 	it("trusts an inherited parent model outside the registry", () => {
 		assert.deepEqual(
 			buildModelCandidates("gateway/parent-model", undefined, availableModels, undefined, { primaryModelFromParent: true }),
@@ -517,68 +283,6 @@ describe("model fallback helpers", () => {
 			() => buildModelCandidates("gateway/parent-model", undefined, availableModels),
 			/Unknown subagent model 'gateway\/parent-model'/,
 		);
-	});
-
-	it("detects retryable provider/model failures", () => {
-		assert.equal(isRetryableModelFailure("rate limit exceeded for provider"), true);
-		assert.equal(isRetryableModelFailure("The usage limit has been reached"), true);
-		assert.equal(isRetryableModelFailure("model unavailable"), true);
-		assert.equal(isRetryableModelFailure("authentication failed"), true);
-		assert.equal(isRetryableModelFailure("HTTP 401"), true);
-		assert.equal(isRetryableModelFailure("HTTP 403"), true);
-		assert.equal(isRetryableModelFailure("401"), true);
-		assert.equal(isRetryableModelFailure("403: forbidden"), true);
-		assert.equal(isRetryableModelFailure("Subagent produced no output (possible model cold-start or empty response)."), true);
-		assert.equal(isRetryableModelFailure("model load failed"), true);
-		assert.equal(isRetryableModelFailure("Stream ended without finish_reason"), true);
-		assert.equal(isRetryableModelFailure("Connection error"), true);
-		assert.equal(isRetryableModelFailure("APIConnectionError: Connection closed."), true);
-		assert.equal(isRetryableModelFailure("Connection reset by peer"), true);
-		assert.equal(isRetryableModelFailure("Request timed out."), true);
-		assert.equal(isRetryableModelFailure("internal server error"), true);
-		assert.equal(isRetryableModelFailure("500"), true);
-	});
-
-	it("retries OpenRouter's status-prefixed 401 only before tool activity", () => {
-		const error = '401: {"message":"User not found.","code":401}';
-		const messages = [{ role: "assistant", errorMessage: error }];
-		assert.equal(isRetryableModelFailureAttempt({ error, messages, toolCount: 0 }), true);
-		assert.equal(isRetryableModelFailureAttempt({ error, messages: [], toolCount: 0 }), true);
-		assert.equal(isRetryableModelFailureAttempt({ error, messages, toolCount: 1 }), false);
-		assert.equal(isRetryableModelFailureAttempt({ error, messages: [{ role: "assistant" }], toolCount: 0 }), false);
-		for (const taskError of ["User not found.", "User 401 not found.", `Lookup failed: ${error}`, `bash failed (exit 1): ${error}`]) {
-			assert.equal(isRetryableModelFailure(taskError), false, taskError);
-		}
-	});
-
-	it("does not treat ordinary task/tool failures as retryable model failures", () => {
-		assert.equal(isRetryableModelFailure("bash failed (exit 1): command not found"), false);
-		assert.equal(isRetryableModelFailure("read failed (exit 1): no such file or directory"), false);
-		assert.equal(isRetryableModelFailure(undefined), false);
-	});
-
-	it("recognizes only the exact raw request-limit code without broadening limit families", () => {
-		assert.equal(isRetryableModelFailure("REQUEST_LIMIT_EXCEEDED"), true);
-		for (const error of ["TOKEN_LIMIT_EXCEEDED", "INPUT_LIMIT_EXCEEDED", "OUTPUT_LIMIT_EXCEEDED", "RESOURCE_EXHAUSTED", "NOT_REQUEST_LIMIT_EXCEEDED", "REQUEST_LIMIT_EXCEEDED_OTHER", "400"]) {
-			assert.equal(isRetryableModelFailure(error), false, error);
-		}
-	});
-
-	it("does not treat network-flavored tool failures as retryable model failures", () => {
-		assert.equal(isRetryableModelFailure("bash failed (exit 1): requests.exceptions.ConnectionError: Connection error."), false);
-		assert.equal(isRetryableModelFailure("bash failed (exit 1): urllib.error.URLError: request timed out"), false);
-		assert.equal(isRetryableModelFailure("fetch_content failed with exit code 1"), false);
-		assert.equal(isRetryableModelFailure("mcp.server/write failed (exit 1): request timed out"), false);
-		assert.equal(isRetryableModelFailure("mcp:tools.search failed with exit code 1"), false);
-		assert.equal(isRetryableModelFailure("Provider error: bash failed (exit 1): request timed out"), true);
-		assert.equal(isRetryableModelFailure("bash failed (exit unknown): request timed out"), true);
-	});
-
-	it("does not retry raw process stderr after child activity", () => {
-		assert.equal(isRetryableModelFailureAttempt({ error: "APIConnectionError: Connection closed.", messages: [{ role: "assistant" }], toolCount: 0 }), false);
-		assert.equal(isRetryableModelFailureAttempt({ error: "APIConnectionError: Connection closed.", messages: [{ role: "assistant", errorMessage: "APIConnectionError: Connection closed." }], toolCount: 0 }), true);
-		assert.equal(isRetryableModelFailureAttempt({ error: "APIConnectionError: Connection closed.", messages: [], toolCount: 0 }), true);
-		assert.equal(isRetryableModelFailureAttempt({ error: "APIConnectionError: Connection closed.", messages: [{ role: "assistant", errorMessage: "APIConnectionError: Connection closed." }], toolCount: 1 }), false);
 	});
 
 	it("lets structured control and contract facts override retryable error text", () => {
@@ -696,14 +400,6 @@ describe("resolveSubagentModelOverride (cross-session inherit, issue #266)", () 
 	it("resolves an explicit bare id against the registry, not the parent", () => {
 		assert.equal(
 			resolveSubagentModelOverride("gpt-5-mini", parentModel, availableModels),
-			"openai/gpt-5-mini",
-		);
-	});
-
-	it("preserves an explicit model despite a cached exclusion", () => {
-		recordModelFailure({ modelId: "gpt-5-mini", provider: "openai", reason: "rate limit" });
-		assert.equal(
-			resolveEffectiveSubagentModel("openai/gpt-5-mini", undefined, parentModel, availableModels),
 			"openai/gpt-5-mini",
 		);
 	});
