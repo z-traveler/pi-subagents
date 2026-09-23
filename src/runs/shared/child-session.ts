@@ -18,6 +18,7 @@ import { getAgentDir, PI_CODING_AGENT_PACKAGE_ROOT_ENV } from "../../shared/util
 import { resolvePackageSubpath } from "../background/runner-aliases.ts";
 import { PI_CODING_AGENT_PACKAGE, resolveInstalledPiPackageRoot, resolvePiPackageRoot } from "./pi-spawn.ts";
 import type { ChildRuntimeConfig } from "./child-runtime-config.ts";
+import { handoffModelHistory } from "./model-handoff.ts";
 import type { RequiredChildExtensionSnapshot } from "../../shared/required-child-extensions.ts";
 import type { HerdrMachineReference, HerdrRemoteGitStatus } from "../../shared/types.ts";
 
@@ -429,6 +430,8 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 				if (resolved.thinkingLevel !== undefined) {
 					session.setThinkingLevel(clampThinkingLevel(resolved.model, resolved.thinkingLevel));
 				}
+				handoffModelHistory(session, pi, launch.runtime.fanoutChild);
+				responseCheckpoint = session.sessionManager.getLeafId();
 			};
 			// Agent awaits its listeners in registration order. AgentSession dispatches
 			// turn_end to child subscribers first; this later listener then prevents the
@@ -463,7 +466,11 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 			};
 			const child: ChildSession = {
 				subscribe: (listener) => session.subscribe((event) => listener(event as unknown as ChildSessionEvent)),
-				prompt: (text) => session.prompt(text),
+				prompt: async (text) => {
+					// Resumed/fallback sessions may open directly on a different candidate.
+					handoffModelHistory(session, pi, launch.runtime.fanoutChild);
+					await session.prompt(text);
+				},
 				steer: (text) => session.steer(text),
 				followUp: (text) => session.followUp(text),
 				abort: () => session.abort(),

@@ -69,6 +69,25 @@ jobs:
           NODE_DISABLE_COMPILE_CACHE: '1'
         run: node --experimental-strip-types --import ./test/support/isolated-temp-root.mjs --import ./test/support/native-peer-loader.mjs --test test/integration/nested-async-wait.test.ts
 
+  native-model-handoff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      # The ordinary integration suite covers 0.86.1's live loop; also exercise
+      # 0.87's canonical session projection through the host-owned SDK loader.
+      - name: Install Pi 0.87 SDK
+        run: npm install --prefix "${{ runner.temp }}/handoff-host" --no-package-lock --ignore-scripts @earendil-works/pi-coding-agent@0.87.0
+      - name: Native model handoff
+        env:
+          PI_SUBAGENTS_NATIVE_PI_ROOT: ${{ runner.temp }}/handoff-host/node_modules/@earendil-works/pi-coding-agent
+          NODE_DISABLE_COMPILE_CACHE: '1'
+        run: node --experimental-strip-types --import ./test/support/isolated-temp-root.mjs --import ./test/support/native-peer-loader.mjs --test test/integration/model-switch-handoff.test.ts
+
   bun-workflow-script:
     runs-on: ubuntu-latest
     timeout-minutes: 10
