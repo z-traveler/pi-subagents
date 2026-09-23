@@ -30,6 +30,7 @@ function fixture(checkpointRole: "user" | "toolResult" = "user", resolvedMaxToke
 	const prompts: string[] = [];
 	const navigations: string[] = [];
 	let continuations = 0;
+	const continuationMessages: unknown[] = [];
 	let leafId: string | null = "input";
 	let releaseNavigation: (() => void) | undefined;
 	let navigationGate: Promise<void> | undefined;
@@ -55,7 +56,7 @@ function fixture(checkpointRole: "user" | "toolResult" = "user", resolvedMaxToke
 		agent: {
 			state,
 			hasQueuedMessages: () => false,
-			async continue() { continuations += 1; },
+			async continue() { throw new Error("Retry must use the public session lifecycle."); },
 			subscribe(listener: (event: ChildSessionEvent) => void | Promise<void>) {
 				agentListeners.add(listener);
 				return () => agentListeners.delete(listener);
@@ -67,6 +68,7 @@ function fixture(checkpointRole: "user" | "toolResult" = "user", resolvedMaxToke
 		extensionRunner: { hasHandlers: () => false },
 		subscribe(listener: (event: ChildSessionEvent) => void) { listeners.add(listener); return () => listeners.delete(listener); },
 		async prompt(text: string) { prompts.push(text); },
+		async sendCustomMessage(message: unknown, options: unknown) { continuations += 1; continuationMessages.push({ message, options }); },
 		async abort() {},
 		async steer() {},
 		async followUp() {},
@@ -125,6 +127,7 @@ function fixture(checkpointRole: "user" | "toolResult" = "user", resolvedMaxToke
 		createdModels,
 		thinkingChanges,
 		prompts,
+		continuationMessages,
 		navigations,
 		get continuations() { return continuations; },
 		emit(event: ChildSessionEvent) { for (const listener of listeners) listener(event); },
@@ -237,6 +240,10 @@ describe("default child model switching", () => {
 		assert.deepEqual(seen.navigations, ["input"]);
 		assert.deepEqual(seen.prompts, []);
 		assert.equal(seen.continuations, 1);
+		assert.deepEqual(seen.continuationMessages, [{
+			message: { customType: "subagent-model-retry", content: "Continue the existing task from the retained tool results; do not repeat completed mutations.", display: false },
+			options: { triggerTurn: true },
+		}]);
 	});
 
 	it("does not change model or restart generation when the lifecycle guard closes during navigation", async () => {

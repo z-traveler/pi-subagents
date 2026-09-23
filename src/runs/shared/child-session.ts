@@ -20,6 +20,7 @@ import { getAgentDir, PI_CODING_AGENT_PACKAGE_ROOT_ENV } from "../../shared/util
 import { resolvePackageSubpath } from "../background/runner-aliases.ts";
 import { PI_CODING_AGENT_PACKAGE, resolveHostPiPackageRoot } from "./pi-spawn.ts";
 import type { ChildRuntimeConfig } from "./child-runtime-config.ts";
+import { handoffModelHistory } from "./model-handoff.ts";
 import type { RequiredChildExtensionSnapshot } from "../../shared/required-child-extensions.ts";
 import type { PlacementMachineReference, HerdrRemoteGitStatus } from "../../shared/types.ts";
 
@@ -682,6 +683,19 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 			const opened = loading.catch(() => {}).then(open);
 			loading = opened;
 			const session = await opened;
+			let inheritedEntryIds: Set<string> | undefined;
+			if (launch.runtime.forkCacheKey) {
+				// Forks retain their parent's entry ids, including when wall-clock timestamps are equal.
+				inheritedEntryIds = new Set(session.sessionManager.getEntries().map((entry) => entry.id));
+				const parentSession = session.sessionManager.getHeader()?.parentSession;
+				if (parentSession) {
+					try {
+						inheritedEntryIds = new Set(pi.parseSessionEntries(fs.readFileSync(parentSession, "utf8")).map((entry) => entry.id));
+					} catch {
+						// Without the parent, earlier ownership is unproven: preserve all launch history.
+					}
+				}
+			}
 			let pending: Promise<void> | undefined;
 			let pendingModelSwitch: Promise<void> | undefined;
 			let responseCheckpoint: string | null | undefined;
@@ -704,6 +718,8 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 				if (resolved.thinkingLevel !== undefined) {
 					session.setThinkingLevel(clampThinkingLevel(resolved.model, resolved.thinkingLevel));
 				}
+				handoffModelHistory(session, pi, launch.runtime.fanoutChild);
+				responseCheckpoint = session.sessionManager.getLeafId();
 			};
 			// Agent awaits its listeners in registration order. AgentSession dispatches
 			// turn_end to child subscribers first; this later listener then prevents the
@@ -749,7 +765,11 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 			}
 			const child: ChildSession = {
 				subscribe: (listener) => session.subscribe((event) => listener(event as unknown as ChildSessionEvent)),
-				prompt: (text) => session.prompt(text),
+				prompt: async (text) => {
+					// Resumed/fallback sessions may open directly on a different candidate.
+					handoffModelHistory(session, pi, launch.runtime.fanoutChild, inheritedEntryIds);
+					await session.prompt(text);
+				},
 				...(commands ? { finishCommands: () => commands.finish() } : {}),
 				steer: async (text) => { await session.steer(text); },
 				followUp: async (text) => { await session.followUp(text); },
@@ -772,7 +792,11 @@ export function createDefaultChildSessionFactory(options: DefaultChildSessionFac
 					await applyRuntimeModel(reference);
 					if (canContinue && !canContinue("before-generation")) return;
 					if (navigation.editorText !== undefined) await session.prompt(navigation.editorText);
-					else await session.agent.continue();
+					else await session.sendCustomMessage({
+						customType: "subagent-model-retry",
+						content: "Continue the existing task from the retained tool results; do not repeat completed mutations.",
+						display: false,
+					}, { triggerTurn: true });
 				},
 				hasQueuedMessages: () => session.agent?.hasQueuedMessages?.() === true,
 				dispose: () => {
