@@ -54,7 +54,7 @@ When you finish implementing, run a reviewer subagent before summarizing.
 
 ## Session Fast routing
 
-After configuring eligible exact model IDs in `fastMode.models`, use `/fast` to toggle the current root session or `/fast on|off|status` to control it explicitly. Session Fast keeps the selected provider and model unchanged and requests `service_tier: "priority"` for eligible native Pi requests throughout the child tree. It remains independent from the per-launch `fast: true` option; external CLI and external-job runners are unaffected. See [Models](docs/models.md) and [Configuration](docs/configuration.md#fastmode).
+After configuring eligible exact model IDs or `/pattern/` regexes (for example, `/^gpt-/`) in `fastMode.models`, use `/fast` to toggle the current root session or `/fast on|off|status` to control it explicitly. Session Fast keeps the selected provider and model unchanged and requests `service_tier: "priority"` for eligible native Pi requests throughout the child tree. It remains independent from the per-launch `fast: true` option; external CLI and external-job runners are unaffected. See [Models](docs/models.md) and [Configuration](docs/configuration.md#fastmode).
 
 ## Builtin agents
 

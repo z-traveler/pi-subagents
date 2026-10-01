@@ -251,7 +251,7 @@ export default function() {
 			agentConfig: makeAgent("worker", { model: "alternate-provider/gpt-5.6-sol", completionGuard: false }),
 			ctx: {
 				pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1",
-				sessionFastMode: new SessionFastModePolicy(["gpt-5.6-sol"], true),
+				sessionFastMode: new SessionFastModePolicy(["/^gpt-/"], true),
 			},
 			availableModels: [{ provider: "alternate-provider", id: "gpt-5.6-sol", fullId: "alternate-provider/gpt-5.6-sol" }],
 			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
@@ -263,9 +263,9 @@ export default function() {
 		assert.equal(launched.isError, undefined, launched.content[0]?.text);
 
 		const initial = await waitForProof(initialPath);
-		writeSessionFastModeSnapshot(asyncDir, { version: 1, enabled: false, modelIds: ["gpt-5.6-sol"] });
+		writeSessionFastModeSnapshot(asyncDir, { version: 1, enabled: false, modelIds: ["/^gpt-/"] });
 		const off = await waitForProof(offPath);
-		writeSessionFastModeSnapshot(asyncDir, { version: 1, enabled: true, modelIds: ["gpt-5.6-sol"] });
+		writeSessionFastModeSnapshot(asyncDir, { version: 1, enabled: true, modelIds: ["/^gpt-/"] });
 		const on = await waitForProof(onPath);
 		const payload = JSON.parse(fs.readFileSync(await waitForAsyncResultFile(id), "utf8")) as AsyncResultPayload;
 		await waitForAsyncEvent(id, "subagent.run.process_terminal");

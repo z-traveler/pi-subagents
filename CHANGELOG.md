@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+### Added
+- Session Fast's `fastMode.models` accepts `/pattern/` regexes without flags alongside exact model IDs. `/^gpt-/` enables GPT-prefixed model IDs across providers and native child runtimes; malformed regexes fail config loading.
 
 ### Changed
 - Completed foreground results print a `Revive:` line naming the run id, matching `status` and Intercom result cards, so a foreground child can be resumed without guessing its id.

@@ -158,7 +158,7 @@ Launch Fast fails before launch unless every resolved model candidate is on the 
 
 ## Session Fast (`/fast`)
 
-Session Fast requests `service_tier: "priority"` without changing the logical model or provider route. Configure eligible exact model IDs in the extension config (see [configuration.md](configuration.md)):
+Session Fast requests `service_tier: "priority"` without changing the logical model or provider route. Configure eligible model IDs or `/pattern/` regexes in the extension config (see [configuration.md](configuration.md)):
 
 ```json
 {
@@ -168,7 +168,7 @@ Session Fast requests `service_tier: "priority"` without changing the logical mo
 }
 ```
 
-Eligibility uses `model.id` only and is provider-independent. Matching is exact and case-sensitive; there is no suffix, family, or fuzzy matching. An ID may itself contain `/`. The `fast` semantic model-pool name is unrelated.
+Eligibility uses `model.id` only and is provider-independent. Plain entries match exact, case-sensitive IDs; entries beginning with `/` are JavaScript regexes in `/pattern/` form without flags. For example, `"models": ["/^gpt-/"]` enables all IDs starting with `gpt-`, including future versions. An exact ID may itself contain `/` but cannot start with `/`. Invalid regexes fail config loading. Matching does not verify service-side support. The `fast` semantic model-pool name is unrelated.
 
 The mode is off by default. `/fast` toggles it, `/fast on` and `/fast off` set it explicitly, and `/fast status` reports both the session state and whether the current model is eligible. The state is stored on the active session branch, so resume, reload, and fork restore the last branch value.
 

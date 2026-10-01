@@ -21,7 +21,7 @@ import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { POLL_INTERVAL_MS } from "../../shared/types.ts";
 import { shouldUseNativeFsWatch } from "../../shared/watch-strategy.ts";
 import { resolveWatchPath } from "../../shared/utils.ts";
-import { SESSION_FAST_MODE_SNAPSHOT_VERSION, type SessionFastModeSnapshot } from "../shared/session-fast-mode.ts";
+import { compileSessionFastModelPattern, SESSION_FAST_MODE_SNAPSHOT_VERSION, type SessionFastModeSnapshot } from "../shared/session-fast-mode.ts";
 
 export type ControlChannelFs = Pick<typeof fs, "mkdirSync" | "existsSync" | "rmSync" | "watch" | "readdirSync" | "readFileSync" | "realpathSync">;
 
@@ -145,6 +145,11 @@ function parseSessionFastModeSnapshot(raw: unknown): SessionFastModeSnapshot | u
 		|| typeof snapshot.enabled !== "boolean"
 		|| !Array.isArray(snapshot.modelIds)
 		|| !snapshot.modelIds.every((modelId) => typeof modelId === "string" && Boolean(modelId.trim()) && modelId === modelId.trim())) return undefined;
+	try {
+		for (const modelId of snapshot.modelIds) compileSessionFastModelPattern(modelId);
+	} catch {
+		return undefined;
+	}
 	return { version: SESSION_FAST_MODE_SNAPSHOT_VERSION, enabled: snapshot.enabled, modelIds: [...snapshot.modelIds] };
 }
 

@@ -11,6 +11,7 @@ import { MAX_ABANDONED_SLOT_RELEASE_AFTER_MS, MIN_ABANDONED_SLOT_RELEASE_AFTER_M
 import { normalizeWorktreeBranchPrefix } from "../runs/shared/worktree.ts";
 import { validateModelResponseAliases } from "../shared/model-response-aliases.ts";
 import { validateDisabledFeatures } from "../shared/disabled-features.ts";
+import { compileSessionFastModelPattern } from "../runs/shared/session-fast-mode.ts";
 
 // Explicit route identity, worktree, checkpoint, and tool-surface policies must not be silently
 // discarded and replaced by the built-in defaults after validation fails.
@@ -110,7 +111,14 @@ function validateFastModeConfig(value: unknown): void {
 	const models = (value as Record<string, unknown>).models;
 	if (models === undefined) return;
 	if (!Array.isArray(models) || models.some((model) => typeof model !== "string" || !model.trim() || model !== model.trim())) {
-		throw new Error("config.fastMode.models must be an array of exact non-empty model ID strings");
+		throw new Error("config.fastMode.models must be an array of non-empty model IDs or /pattern/ regex strings");
+	}
+	for (const model of models) {
+		try {
+			compileSessionFastModelPattern(model);
+		} catch (error) {
+			throw new Error(`config.fastMode.models contains invalid regex ${JSON.stringify(model)}: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 }
 
