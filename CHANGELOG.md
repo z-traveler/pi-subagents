@@ -4,6 +4,8 @@
 
 ### Added
 
+- Session Fast's `fastMode.models` accepts `/pattern/` regexes without flags alongside exact model IDs. `/^gpt-/` enables GPT-prefixed model IDs across providers and native child runtimes; malformed regexes fail config loading.
+
 - `registerRequiredChildExtensions` accepts `requireForAllRunners: true`. Only local native Pi children load required extensions, so with this flag a launch on an external CLI runner, an external-job runner, or a machine placement is rejected before anything starts, instead of running without them. The requirement stays with the run, so nested, resumed, recovered, appended, and workflow-script children keep it after the host disposes its registration. Registrations without the flag still exclude external runners. See [agents](docs/agents.md). Thanks to [@doc-krieger](https://github.com/doc-krieger) for [#2639](https://github.com/nicobailon/pi-subagents/issues/2639).
 - `schedule.create` accepts an existing `missionId`, so each scheduled workflow can reuse its mission state across fires and session restoration. Attachment follows ordinary mission lifecycle and retention rules. Mission-bound definitions use schema version 2 so older schedulers reject them instead of dropping the attachment; unbound definitions remain version 1. Thanks to [@quifox](https://github.com/quifox) for [#2616](https://github.com/nicobailon/pi-subagents/pull/2616).
 - `asyncWidgetCollapsed: true` starts newly mounted under-editor async widgets in their one-line folded state. Header clicks still toggle the widget, and the default remains unfolded. Thanks to [@unrelentingfox](https://github.com/unrelentingfox) for [#2621](https://github.com/nicobailon/pi-subagents/pull/2621).

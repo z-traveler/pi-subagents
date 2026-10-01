@@ -30,7 +30,7 @@ test("a fanout child forwards the latest Session Fast snapshot to nested backgro
 		getAllTools() { return tools; },
 		getSessionName() { return "coordinator"; },
 	};
-	const policy = new SessionFastModePolicy(["gpt-5.6-sol"]);
+	const policy = new SessionFastModePolicy(["/^gpt-/"]);
 	const state = createChildSafeState();
 	state.currentSessionId = "nested-session";
 	try {
@@ -54,7 +54,7 @@ test("a fanout child forwards the latest Session Fast snapshot to nested backgro
 		assert.deepEqual(JSON.parse(fs.readFileSync(sessionFastModeSnapshotPath(asyncDir), "utf-8")), {
 			version: 1,
 			enabled: false,
-			modelIds: ["gpt-5.6-sol"],
+			modelIds: ["/^gpt-/"],
 		});
 
 		policy.setEnabled(true);
@@ -62,7 +62,7 @@ test("a fanout child forwards the latest Session Fast snapshot to nested backgro
 		assert.deepEqual(JSON.parse(fs.readFileSync(sessionFastModeSnapshotPath(asyncDir), "utf-8")), {
 			version: 1,
 			enabled: true,
-			modelIds: ["gpt-5.6-sol"],
+			modelIds: ["/^gpt-/"],
 		});
 	} finally {
 		for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, {});

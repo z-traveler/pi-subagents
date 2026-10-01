@@ -324,13 +324,14 @@ Package skill content.
 		assert.throws(() => loadConfig(), /config\.scheduledRuns\.enabled must be a boolean/);
 	});
 
-	it("loads exact provider-independent Fast model IDs and rejects malformed policy", () => {
+	it("loads provider-independent Fast model IDs and regexes and rejects malformed policy", () => {
 		const configPath = path.join(agentDir, "extensions", "subagent", "config.json");
-		const fastMode = { models: ["gpt-5.6-sol", "owner/model"] };
+		const fastMode = { models: ["gpt-5.6-sol", "owner/model", "/^gpt-/"] };
 		writeFile(configPath, JSON.stringify({ fastMode }));
 		assert.deepEqual(loadConfig().fastMode, fastMode);
 
-		for (const value of [null, [], { models: "gpt-5.6-sol" }, { models: [""] }, { models: [" gpt-5.6-sol"] }]) {
+		for (const value of [null, [], { models: "gpt-5.6-sol" }, { models: [""] }, { models: [" gpt-5.6-sol"] },
+			{ models: ["/[/"] }, { models: ["/^gpt-/i"] }, { models: ["/^gpt-"] }, { models: ["//"] }]) {
 			writeFile(configPath, JSON.stringify({ fastMode: value }));
 			assert.throws(() => loadConfig(), /config\.fastMode/);
 		}

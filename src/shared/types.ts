@@ -2644,7 +2644,7 @@ export interface ScheduledRunsConfig {
 }
 
 export interface SessionFastModeConfig {
-	/** Exact provider-independent model IDs eligible for the priority service tier. */
+	/** Provider-independent exact model IDs or /pattern/ regexes eligible for the priority service tier. */
 	models?: string[];
 }
 
@@ -2712,7 +2712,7 @@ export interface ExtensionConfig {
 	asyncWidget?: boolean;
 	/** Start the under-editor async runs widget folded. Defaults to false. */
 	asyncWidgetCollapsed?: boolean;
-	/** Configure root-session Fast routing by exact provider-independent model ID. */
+	/** Configure root-session Fast routing by provider-independent model ID or /pattern/ regex. */
 	fastMode?: SessionFastModeConfig;
 	/** Exact provider/model candidates mapped to operator-declared equivalent response IDs. Empty arrays add no accepted IDs. */
 	modelResponseAliases?: Record<string, string[]>;
