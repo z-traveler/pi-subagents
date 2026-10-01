@@ -3033,7 +3033,7 @@ function discoverAgentsUncached(cwd: string, scope: AgentScope, preferredModelPr
 	const modelPerformance = userSettings.modelPerformance || projectSettings.modelPerformance
 		? resolveModelPerformanceConfig(userSettings.modelPerformance, projectSettings.modelPerformance)
 		: undefined;
-	
+
 
 	const packageSubagentPaths = collectPackageSubagentPaths(effectiveCwd, { includeUser: scope !== "project", includeProject: scope !== "user", globalNpmRoot: options.globalNpmRoot });
 	const isExcluded = agentExclusions(agentExclusionRoots(userSettingsPath, projectSettingsPath));

@@ -449,8 +449,8 @@ function extractServers(config: unknown, kind: ImportKind): Record<string, Serve
 	return parseServerEntries(servers);
 }
 
-export function resolveMcpDirectToolNames(mcpDirectTools: string[] | undefined, cwd = process.cwd()): string[] {
-	return resolveMcpDirectToolSelections(mcpDirectTools, cwd).map((selection) => selection.name);
+export function resolveMcpDirectToolNames(mcpDirectTools: string[] | undefined, cwd = process.cwd(), host?: McpRuntimeSnapshotHost): string[] {
+	return resolveMcpDirectToolSelections(mcpDirectTools, cwd, host).map((selection) => selection.name);
 }
 
 function validateSelectedServerDefinitions(config: McpConfig, selectors: string[]): void {

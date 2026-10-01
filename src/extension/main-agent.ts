@@ -139,7 +139,7 @@ async function applyMainAgent(pi: ExtensionAPI, ctx: ExtensionContext, agent: Ag
 	if (agent.tools !== undefined || agent.mcpDirectTools !== undefined) {
 		pi.setActiveTools([
 			...(agent.tools ?? []),
-			...resolveMcpDirectToolNames(agent.mcpDirectTools, ctx.cwd),
+			...resolveMcpDirectToolNames(agent.mcpDirectTools, ctx.cwd, pi),
 		]);
 	}
 	pi.appendEntry(MAIN_AGENT_ENTRY_TYPE, { name: agent.name });

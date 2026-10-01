@@ -126,6 +126,7 @@ export function stopInboxClosedPath(asyncDir: string): string {
 
 export function closeStopInbox(asyncDir: string): void {
 	writeAtomicJson(stopInboxClosedPath(asyncDir), { version: 1, closedAt: Date.now() });
+}
 
 export function sessionFastModeSnapshotPath(asyncDir: string): string {
 	return path.join(controlInboxDir(asyncDir), "session-fast-mode.json");

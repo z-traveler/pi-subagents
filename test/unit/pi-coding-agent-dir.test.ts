@@ -317,6 +317,7 @@ Package skill content.
 		const configPath = path.join(agentDir, "extensions", "subagent", "config.json");
 		writeFile(configPath, JSON.stringify({ scheduledRuns: { enabled: "false" } }));
 		assert.throws(() => loadConfig(), /config\.scheduledRuns\.enabled must be a boolean/);
+	});
 
 	it("loads exact provider-independent Fast model IDs and rejects malformed policy", () => {
 		const configPath = path.join(agentDir, "extensions", "subagent", "config.json");
