@@ -453,7 +453,7 @@ tools:
   - mcp:github/search_repositories
 ```
 
-Field notes:
+### Frontmatter field notes
 
 | Field | Notes |
 |-------|-------|

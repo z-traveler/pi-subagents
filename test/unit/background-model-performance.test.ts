@@ -451,7 +451,7 @@ describe("background model performance selection", () => {
 						messages.push(toolCall, toolResult);
 						emit({ type: "message_end", message: toolCall });
 						emit({ type: "tool_execution_start", toolCallId: "read-1", toolName: "read", args: { path: "README.md" } });
-						emit({ type: "tool_result_end", toolCallId: "read-1", toolName: "read", message: toolResult });
+						emit({ type: "message_end", message: toolResult });
 						emit({ type: "tool_execution_end", toolCallId: "read-1", toolName: "read" });
 						emit({ type: "turn_end", message: toolCall, toolResults: [toolResult] });
 						initialPending = true;
@@ -766,7 +766,7 @@ describe("background model performance selection", () => {
 						assert.deepEqual(switches, [], "soft degradation must wait until the current turn finishes");
 						const toolResult = { role: "toolResult", toolCallId: "read-1", toolName: "read", content: [{ type: "text", text: "retained tool result" }] };
 						messages.push(toolResult);
-						emit({ type: "tool_result_end", toolCallId: "read-1", toolName: "read", message: toolResult });
+						emit({ type: "message_end", message: toolResult });
 						emit({ type: "tool_execution_end", toolCallId: "read-1", toolName: "read" });
 						emit({ type: "turn_end", message: toolCall, toolResults: [toolResult] });
 						now = 32_000;

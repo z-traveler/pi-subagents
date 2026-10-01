@@ -334,9 +334,6 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		return;
 	}
 	registerNamedMainAgent(pi);
-	registerMainModelPerformanceAdvisory(pi, {
-		probe: createMainModelPerformanceProbe(),
-	});
 	const runtimeRegistry = getRuntimeRegistry();
 	setMainThinkingLevelSource(() => readMainThinkingLevel(() => pi.getThinkingLevel()));
 
@@ -345,6 +342,10 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	cleanupOldChainDirs();
 
 	const config = loadConfig();
+	registerMainModelPerformanceAdvisory(pi, {
+		probe: createMainModelPerformanceProbe(),
+		enableSlashCommands: config.enableSlashCommands,
+	});
 	setDeclarationPinning(pi, config.pinToolDeclarations !== false);
 	const waitToolConfig = resolveWaitToolConfig(config.waitTool);
 	const asyncByDefault = resolveAsyncByDefault(config);
@@ -409,7 +410,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			}
 		}
 	};
-	const sessionFastMode = registerSessionFastMode(pi, config.fastMode?.models ?? [], { onChange: broadcastSessionFastMode });
+	const sessionFastMode = registerSessionFastMode(pi, config.fastMode?.models ?? [], { onChange: broadcastSessionFastMode, enableSlashCommands: config.enableSlashCommands });
 	const withLastUiContext = <T>(run: (ctx: ExtensionContext) => T): T | undefined => {
 		const cached = state.lastUiContext;
 		return withCachedUiContext(cached, () => {

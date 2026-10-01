@@ -549,6 +549,7 @@ class MainModelPerformanceOverlay implements Component {
 }
 
 export interface RegisterMainModelPerformanceOptions {
+	enableSlashCommands?: boolean;
 	discover?: (cwd: string, preferredModelProvider?: string, options?: { projectTrusted?: boolean }) => Pick<AgentDiscoveryResult, "modelPools" | "modelPerformance">;
 	now?: () => number;
 	schedule?: (run: () => void, intervalMs: number) => () => void;
@@ -601,7 +602,7 @@ export function registerMainModelPerformanceAdvisory(
 	if (options.probe) runtimeOptions.probe = options.probe;
 	runtimeOptions.getThinkingLevel = () => pi.getThinkingLevel();
 	const runtime = new MainModelPerformanceRuntime(runtimeOptions);
-	pi.registerCommand("subagents-model-performance", {
+	if (options.enableSlashCommands !== false) pi.registerCommand("subagents-model-performance", {
 		description: "Inspect cached measurements and candidate order for every configured model class",
 		handler: async (args, context) => {
 			if (args.trim()) {

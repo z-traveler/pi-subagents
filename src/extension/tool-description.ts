@@ -26,7 +26,7 @@ const structuredCalls = "One child: {agent,task}. Parallel: tasks:[{agent,task,c
 const essentials = (on: FeatureText) => `${on("workflow-scripts", scriptCalls, structuredCalls)}
 Management: {action,id?,options:{...}}; fields not in this schema go in options.
 Launch agents by name and pass models as exact provider/id; an unknown agent or model returns the valid choices.
-Use options.modelClass for a configured semantic tier and model for an exact one-off override; never set both. Model-class failover stays inside that class and stops when external or unknown effects make replay unsafe.
+Use options.modelClass for a semantic tier; never set both model and modelClass. Failover stays inside that class and stops at unsafe effects.
 Details: guide workflows/recommended-orchestration-pattern (async, review, failure recovery), ${on("workflow-scripts", "guide workflows/scripted-workflows, ")}guide tool-reference/retained-children, guide tool-reference/external-cli-agent-profiles.
 
 ${SUBAGENT_SAFETY_GUIDANCE}`;

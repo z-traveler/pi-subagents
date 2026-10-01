@@ -179,6 +179,7 @@ function createCommandContext(
 		mode: overrides.mode ?? (overrides.hasUI ? "tui" : "print"),
 		hasUI: overrides.hasUI ?? false,
 		ui: {
+			setWidget() {},
 			notify: overrides.notify ?? ((_message: string) => {}),
 			confirm: overrides.confirm ?? (async () => false),
 			select: overrides.select ?? (async () => undefined),
@@ -250,7 +251,7 @@ describe("Esc while a slash agent is running", () => {
 					},
 					onTerminalInput: (handler: Parameters<TUI["addInputListener"]>[0]) => tui.addInputListener(handler),
 					custom: (factory: Function, options: any) => new Promise<void>((resolve) => {
-						const component = factory(tui, { fg: (_color: string, text: string) => text }, undefined, () => {
+						const component = factory(tui, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, undefined, () => {
 							tui.hideOverlay();
 							component.dispose?.();
 							closeDialog = undefined;
@@ -280,6 +281,7 @@ describe("Esc while a slash agent is running", () => {
 					assert.ok(runSignal, "the slash command started the agent through its real bridge");
 					for (const escape of ["\u001b", "\u001b[27u"]) {
 						const opened = commands.get(inspector)!.handler("", ctx);
+						for (let attempt = 0; attempt < 100 && !tui.hasOverlay(); attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
 						assert.ok(tui.hasOverlay());
 						assert.equal(dialogHasFocus?.(), true, "the inspector has keyboard focus before Esc");
 						sendInput(escape);

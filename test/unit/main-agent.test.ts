@@ -323,23 +323,22 @@ Research the request.
 		fs.writeFileSync(path.join(agentDir, "mcp.json"), JSON.stringify({
 			mcpServers: { github: server },
 		}), "utf-8");
+		fs.writeFileSync(path.join(agentDir, "mcp-adapter.json"), JSON.stringify({
+			mcpServers: { github: server },
+		}), "utf-8");
 		fs.writeFileSync(path.join(agentDir, "mcp-cache.json"), JSON.stringify({
 			version: 1,
-			servers: {
-				github: {
-					configHash: computeMcpServerHash(server),
-					tools: [{ name: "search_repositories" }],
-					resources: [],
-					cachedAt: Date.now(),
-				},
-			},
+			servers: { github: { configHash: computeMcpServerHash(server), tools: [{ name: "search_repositories" }], resources: [], cachedAt: Date.now() } },
 		}), "utf-8");
-
 		const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
 		let activeTools: string[] = [];
+		let builtinMcp = true;
 		const pi = {
+			events: { emit() {} },
 			registerFlag() {},
 			getFlag() { return "researcher"; },
+			getCommands() { return builtinMcp ? [{ name: "mcp", sourceInfo: { path: "builtin:mcp" } }] : [{ name: "mcp-adapter", sourceInfo: { path: "pi-mcp-adapter" } }]; },
+			getAllTools() { return builtinMcp ? [{ name: "mcp__github__search_repositories", namespace: { name: "mcp__github" } }] : [{ name: "github_search_repositories" }]; },
 			on(name: string, handler: (event: unknown, ctx: unknown) => unknown) {
 				const current = handlers.get(name) ?? [];
 				current.push(handler);
@@ -357,6 +356,9 @@ Research the request.
 		registerNamedMainAgent(pi as never);
 		const start = handlers.get("session_start")?.[0];
 		assert.ok(start);
+		await start({ reason: "startup" }, ctx);
+		assert.deepEqual(activeTools, ["read", "mcp__github__search_repositories"]);
+		builtinMcp = false;
 		await start({ reason: "startup" }, ctx);
 		assert.deepEqual(activeTools, ["read", "github_search_repositories"]);
 	} finally {
@@ -700,7 +702,7 @@ WORKER_ONLY_PROMPT_MARKER
 				for (const handler of handlers.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
 				let parentPrompt = "Pi base prompt.";
 				for (const handler of handlers.get("before_agent_start") ?? []) {
-					const result = await handler({ systemPrompt: parentPrompt }, ctx);
+					const result = await handler({ systemPrompt: parentPrompt, systemPromptOptions: { cwd: ctx.cwd, selectedTools: ["subagent"], sections: {} } }, ctx);
 					if (result?.systemPrompt) parentPrompt = result.systemPrompt;
 				}
 				assert.doesNotMatch(parentPrompt, /Pi base prompt\./);

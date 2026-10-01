@@ -44,8 +44,9 @@ describe("child runtime config", () => {
 		assert.deepEqual(hooks.map((hook) => hook.name), [
 			"pi-subagents:prompt-runtime",
 			"pi-subagents:fast-mode",
-			"pi-subagents:session-fast-mode",
 			"pi-subagents:fanout-child",
+			"pi-subagents:session-fast-mode",
+			"pi-subagents:prompt-boundary",
 		]);
 		const pi = fakePi([]);
 		for (const hook of hooks.filter((hook) => hook.name === "pi-subagents:session-fast-mode")) hook.factory(pi.api as never);

@@ -60,6 +60,7 @@ function bridgePi(replies: unknown[], childClaimsBridge?: "load" | "session_star
 			const messages: unknown[] = [];
 			const emit = (message: unknown) => { messages.push(message); for (const listener of listeners) listener({ type: "message_end", message }); };
 			return { session: {
+				sessionManager: { getLeafId: () => null },
 				model: { provider: "bridge", id: "model" }, messages, sessionId: "s", extensionRunner: { hasHandlers: () => false },
 				bindExtensions: async () => { if (childClaimsBridge === "session_start") modelRuntime.registerProvider("bridge", {}); },
 				dispose() {}, abort: async () => {}, steer: async () => {}, followUp: async () => {},

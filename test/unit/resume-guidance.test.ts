@@ -45,7 +45,7 @@ describe("resume guidance", () => {
 		const sessionFile = makeSessionFile("second.jsonl");
 		assert.equal(
 			formatResumeGuidance("run-2", [{ agent: "echo" }, { agent: "echo", sessionFile }]),
-			'Revive child: subagent({ action: "resume", id: "run-2", index: 1, message: "..." })',
+			'Revive child: subagent({ action: "resume", id: "run-2", message: "...", options: { index: 1 } })',
 		);
 	});
 
@@ -86,9 +86,9 @@ describe("resume guidance", () => {
 	});
 
 	it("explains a mission id passed to a run-id lookup", () => {
-		assert.equal(asyncRunNotFoundMessage("deadbeef-0000-0000-0000-000000000000"), "Async run not found. Provide id or dir.");
+		assert.equal(asyncRunNotFoundMessage("deadbeef-0000-0000-0000-000000000000"), "Async run not found for 'deadbeef-0000-0000-0000-000000000000'.");
 		assert.equal(asyncRunNotFoundMessage(undefined), "Async run not found. Provide id or dir.");
-		assert.equal(asyncRunNotFoundMessage("not-a-uuid"), "Async run not found. Provide id or dir.");
+		assert.equal(asyncRunNotFoundMessage("not-a-uuid"), "Async run not found for 'not-a-uuid'.");
 
 		const missionId = "35b46c3d-7a7e-4d84-bb9e-9754f0b1ee09";
 		const missionDir = path.join(getAgentDir(), "missions", "projects", "project-key");

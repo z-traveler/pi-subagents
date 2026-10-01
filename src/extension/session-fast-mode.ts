@@ -33,7 +33,7 @@ function formatStatus(policy: SessionFastModePolicy, modelId: string | undefined
 export function registerSessionFastMode(
 	pi: ExtensionAPI,
 	modelIds: readonly string[],
-	options: { onChange?: (snapshot: SessionFastModeSnapshot) => void } = {},
+	options: { enableSlashCommands?: boolean; onChange?: (snapshot: SessionFastModeSnapshot) => void } = {},
 ): SessionFastModePolicy {
 	const policy = new SessionFastModePolicy(modelIds);
 
@@ -42,7 +42,7 @@ export function registerSessionFastMode(
 		syncSessionFastModeStatus(ctx, policy);
 	});
 	pi.on("before_provider_request", (event, ctx) => policy.rewriteProviderRequest(event.payload, ctx.model?.id));
-	pi.registerCommand("fast", {
+	if (options.enableSlashCommands !== false) pi.registerCommand("fast", {
 		description: "Toggle Session Fast routing, or set it with /fast on|off|status",
 		handler: async (args, ctx) => {
 			const command = args.trim();
