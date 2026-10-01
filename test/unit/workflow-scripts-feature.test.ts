@@ -63,11 +63,13 @@ describe("workflow-scripts tool surface", () => {
 		const validator = Compile(schema);
 		assert.equal(validator.Check({ task: "ship it", tasks: [{ agent: "scout", task: "a" }, { agent: "reviewer", task: "b" }] }), true);
 		assert.equal(validator.Check({ task: "ship it", chain: [{ agent: "scout", task: "{task}", as: "scan" }, { parallel: [{ agent: "reviewer", task: "{outputs.scan}" }] }, { agent: "writer" }] }), true);
+		assert.equal(validator.Check({ tasks: [{ agent: "scout", task: "a", modelClass: "fast" }] }), true);
+		assert.equal(validator.Check({ chain: [{ agent: "scout", modelClass: "fast" }] }), true);
 		assert.equal(validator.Check({ tasks: [{ agent: "scout" }] }), false, "tasks items require task");
-		assert.equal(validator.Check({ chain: [{ agent: "scout", model: "x" }] }), false, "chain steps reject other fields");
+		assert.equal(validator.Check({ chain: [{ agent: "scout", timeoutMs: 1 }] }), false, "chain steps reject other fields");
 		assert.equal(validator.Check({ chain: [] }), false, "chain needs a step");
 		const serialized = JSON.stringify({ tasks: schema.properties.tasks, chain: schema.properties.chain });
-		assert.ok(serialized.length <= 750, `chain/tasks schema is ${serialized.length} chars`);
+		assert.ok(serialized.length <= 850, `chain/tasks schema is ${serialized.length} chars`);
 	});
 
 	it("replaces script guidance with chain/tasks guidance", () => {

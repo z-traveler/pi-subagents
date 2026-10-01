@@ -188,9 +188,6 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		const properties = SubagentParams?.properties as Record<string, JsonSchemaNode> | undefined;
 		assert.equal(properties?.modelClass?.type, "string");
 		assert.match(String(properties?.modelClass?.description ?? ""), /named model pool/i);
-		assert.equal((schemas.ParallelTaskSchema as JsonSchemaNode).properties?.modelClass?.type, "string");
-		assert.equal((schemas.DynamicParallelTemplateSchema as JsonSchemaNode).properties?.modelClass?.type, "string");
-		assert.equal((schemas.ChainItem as JsonSchemaNode).properties?.modelClass?.type, "string");
 	});
 
 	it("includes context field and default precedence for fresh/fork execution mode", () => {
