@@ -477,10 +477,10 @@ describe("control channel: watchAsyncControlInbox", () => {
 		}
 	});
 
-	it("delivers a session Fast mode snapshot that existed before the runner started without consuming it", () => {
+	it("delivers a regex session Fast mode snapshot that existed before the runner started without consuming it", () => {
 		const asyncDir = tmpAsyncDir("pi-control-fast-early-");
 		try {
-			const snapshot = { version: 1 as const, enabled: true, modelIds: ["gpt-5.6-sol"] };
+			const snapshot = { version: 1 as const, enabled: true, modelIds: ["/^gpt-/"] };
 			writeSessionFastModeSnapshot(asyncDir, snapshot);
 			const seen: typeof snapshot[] = [];
 			const h = harness();
@@ -575,8 +575,8 @@ describe("control channel: watchAsyncControlInbox", () => {
 		}
 	});
 
-	it("rejects empty or padded model IDs in a session Fast mode snapshot", () => {
-		for (const modelId of ["", " gpt-5.6-sol"]) {
+	it("rejects empty, padded, or malformed regex entries in a session Fast mode snapshot", () => {
+		for (const modelId of ["", " gpt-5.6-sol", "/[/", "/^gpt-/i"]) {
 			const asyncDir = tmpAsyncDir("pi-control-fast-model-id-");
 			try {
 				fs.mkdirSync(path.dirname(sessionFastModeSnapshotPath(asyncDir)), { recursive: true });

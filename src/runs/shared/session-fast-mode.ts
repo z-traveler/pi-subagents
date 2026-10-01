@@ -6,13 +6,23 @@ export interface SessionFastModeSnapshot {
 	modelIds: string[];
 }
 
+export function compileSessionFastModelPattern(modelId: string): RegExp | undefined {
+	if (!modelId.startsWith("/")) return undefined;
+	if (modelId.length <= 2 || !modelId.endsWith("/")) {
+		throw new Error("Session Fast regex must use /pattern/ syntax without flags");
+	}
+	return new RegExp(modelId.slice(1, -1));
+}
+
 export class SessionFastModePolicy {
 	#modelIds: Set<string>;
+	#patterns: RegExp[];
 	#enabled: boolean;
 	#listeners = new Set<(snapshot: SessionFastModeSnapshot) => void>();
 
 	constructor(modelIds: readonly string[], enabled = false) {
 		this.#modelIds = new Set(modelIds);
+		this.#patterns = modelIds.flatMap((modelId) => compileSessionFastModelPattern(modelId) ?? []);
 		this.#enabled = enabled;
 	}
 
@@ -27,7 +37,10 @@ export class SessionFastModePolicy {
 	}
 
 	isEligible(modelId: string | undefined): boolean {
-		return Boolean(modelId && this.#modelIds.has(modelId));
+		return Boolean(modelId && (
+			(!modelId.startsWith("/") && this.#modelIds.has(modelId))
+			|| this.#patterns.some((pattern) => pattern.test(modelId))
+		));
 	}
 
 	snapshot(): SessionFastModeSnapshot {
@@ -44,8 +57,10 @@ export class SessionFastModePolicy {
 			&& modelIds.size === this.#modelIds.size
 			&& [...modelIds].every((modelId) => this.#modelIds.has(modelId));
 		if (unchanged) return;
+		const patterns = [...modelIds].flatMap((modelId) => compileSessionFastModelPattern(modelId) ?? []);
 		this.#enabled = snapshot.enabled;
 		this.#modelIds = modelIds;
+		this.#patterns = patterns;
 		this.#emit();
 	}
 

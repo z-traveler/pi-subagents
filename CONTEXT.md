@@ -73,5 +73,5 @@ The provider-qualified model identity selected by Pi and retained for routing, r
 _Avoid_: Wire model, service tier
 
 **Fast-Eligible Model ID**:
-An exact model ID whose Fast capability is the same across every provider that serves it.
-_Avoid_: Provider/model mapping, inferred model family
+A model ID selected by an explicit exact-ID or regex policy, independently of the provider serving it.
+_Avoid_: Provider/model mapping, automatic capability detection

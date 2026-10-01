@@ -114,7 +114,7 @@ In `~/.pi/agent/extensions/subagent/config.json`:
 }
 ```
 
-`models` is the exact, case-sensitive allowlist for the root session's `/fast` command. Matching uses Pi's current `model.id` and ignores the provider, so the same listed ID is eligible through any provider. IDs may contain `/`; no provider prefix is added or removed, and there is no fuzzy or family matching. Invalid, empty, or whitespace-padded entries fail config loading.
+`models` allows exact, case-sensitive model IDs and JavaScript regexes written as `/pattern/` without flags. Entries beginning with `/` must be valid non-empty regexes; other entries are exact IDs and may contain `/`. Matching uses Pi's current `model.id` and ignores the provider; no provider prefix is added or removed. Regexes use search matching, so anchor with `^` and `$` when needed. For example, `"models": ["/^gpt-/"]` makes all IDs starting with `gpt-` eligible, including `gpt-6.1-sol`. Invalid regexes, empty entries, and whitespace-padded entries fail config loading. Eligibility requests the priority tier; it does not verify that the service accepts it.
 
 Session Fast is off by default. `/fast` toggles it; `/fast on`, `/fast off`, and `/fast status` are also supported. When enabled on an eligible native Pi model, it adds or overwrites only `service_tier: "priority"` in the next provider request. It does not change the request's model, call `setModel`, or require a particular provider. State follows the active session branch and propagates to native foreground, background, resumed, and nested children; external CLI and external-job runners are unaffected.
 
