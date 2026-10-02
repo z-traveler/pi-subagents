@@ -22,9 +22,13 @@ export function formatSubagentModelVerificationError(
 	observedModel: string,
 	availableModels: AvailableModelInfo[] | undefined,
 	modelResponseAliases?: Record<string, string[]>,
+	observedVirtualModel?: string,
 ): string | undefined {
 	if (!availableModels || availableModels.length === 0) return undefined;
 	const expectedBase = splitThinkingSuffix(expectedModel).baseModel;
+	if (observedVirtualModel !== undefined) {
+		return observedVirtualModel === expectedBase ? undefined : `model_verification_failed: native Pi child selected virtual model '${observedVirtualModel}', but the launch candidate was '${expectedModel}'. modelResponseAliases does not apply to a virtual-model selection.`;
+	}
 	if (modelResponseAliases && Object.hasOwn(modelResponseAliases, expectedBase)
 		&& modelResponseAliases[expectedBase]?.includes(observedModel)) return undefined;
 	const observedBase = splitThinkingSuffix(observedModel).baseModel;
