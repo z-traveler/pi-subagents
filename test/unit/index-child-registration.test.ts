@@ -693,7 +693,7 @@ describe("subagent extension child mode", () => {
 					cwd: process.cwd(), hasUI: true,
 					ui: {
 						setWidget(key, value) { if (key === "subagent-async") widget = value; },
-						requestRender() {}, getToolsExpanded() { return false; },
+						setStatus() {}, requestRender() {}, getToolsExpanded() { return false; },
 						theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } },
 					},
 					sessionManager: { getSessionId() { return "session-widget"; }, getSessionFile() { return null; }, getEntries() { return []; } },
