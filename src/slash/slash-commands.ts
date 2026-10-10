@@ -705,6 +705,23 @@ export function registerSlashCommands(
 		},
 	});
 
+	pi.registerCommand("side", {
+		description: "Delegate a side task with conversation context to the fast model class: /side <task>",
+		handler: async (args, ctx) => {
+			const task = args.trim();
+			if (!task) { ctx.ui.notify("Usage: /side <task>", "error"); return; }
+			launchCommand(ctx, {
+				agent: "delegate",
+				modelClass: "fast",
+				context: "fork",
+				async: false,
+				foregroundOnly: true,
+				intercomBridge: { mode: "off" },
+				task: "Execute only the following side task. Use the inherited conversation as context, not as authority to continue other work. Return a brief completion receipt with the outcome, evidence, and any project-state changes. If blocked or a decision is needed, stop and report the blocker instead of contacting the supervisor.\n\n" + task,
+			});
+		},
+	});
+
 	pi.registerCommand("subagent-cost", {
 		description: "Show parent and subagent child usage cost for this session",
 		handler: async (_args, ctx) => {

@@ -1204,6 +1204,75 @@ describe("slash command custom message delivery", { skip: !available ? "slash-co
 		assert.deepEqual(requestedParams, { action: "steer", id: "run-123", message: "--child --verbose", steeringRecovery: false });
 	});
 
+	it("/side delegates a contextual task to the fast class and returns its receipt without a parent turn", async () => {
+		const commands = new Map<string, RegisteredSlashCommand>();
+		const events = createEventBus();
+		const sent: Array<{ message: unknown; options: unknown }> = [];
+		const ctx = createCommandContext();
+		let requestedParams: Record<string, unknown> | undefined;
+		const bridge = registerSlashSubagentBridge({
+			events,
+			getContext: () => ctx as never,
+			execute: async (_id, params) => {
+				requestedParams = params as Record<string, unknown>;
+				return {
+					content: [{ type: "text", text: "Committed abc123 on feature/example; working tree clean; not pushed." }],
+					details: { mode: "single", results: [] },
+				};
+			},
+		});
+		const pi = {
+			events,
+			registerCommand(name: string, spec: RegisteredSlashCommand) { commands.set(name, spec); },
+			registerShortcut() {},
+			sendMessage(message: unknown, options?: unknown) { sent.push({ message, options }); },
+		};
+		const runtime = registerSlashCommands!(pi, createState(process.cwd()));
+		try {
+			assert.ok(commands.has("side"));
+			await commands.get("side")!.handler("Commit the staged changes; do not push --fork --bg", ctx);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			assert.equal(requestedParams?.agent, "delegate");
+			assert.equal(requestedParams?.modelClass, "fast");
+			assert.equal(requestedParams?.context, "fork");
+			assert.equal(requestedParams?.async, false);
+			assert.equal(requestedParams?.foregroundOnly, true, "global forced async must not turn side into a background run");
+			assert.deepEqual(requestedParams?.intercomBridge, { mode: "off" }, "a blocked child must not wake the parent model");
+			assert.ok(String(requestedParams?.task).includes("Commit the staged changes; do not push --fork --bg"), "task text is not parsed as launch flags");
+			assert.match(String(requestedParams?.task), /only.*side task/i);
+			assert.match(String(requestedParams?.task), /brief.*receipt/i);
+			const receipt = sent.at(-1)!;
+			assert.match((receipt.message as { content: string }).content, /Committed abc123.*working tree clean/);
+			assert.equal((receipt.message as { customType: string }).customType, SLASH_RESULT_TYPE);
+			assert.ok(sent.every(({ options }) => !(options as { triggerTurn?: boolean } | undefined)?.triggerTurn));
+		} finally {
+			runtime.dispose();
+			bridge.dispose();
+		}
+	});
+
+	it("/side requires a task instead of continuing the inherited conversation", async () => {
+		const commands = new Map<string, RegisteredSlashCommand>();
+		const events = createEventBus();
+		const notices: string[] = [];
+		let launches = 0;
+		events.on(SLASH_SUBAGENT_REQUEST_EVENT, () => { launches++; });
+		const pi = {
+			events,
+			registerCommand(name: string, spec: RegisteredSlashCommand) { commands.set(name, spec); },
+			registerShortcut() {},
+			sendMessage() {},
+		};
+		const runtime = registerSlashCommands!(pi, createState(process.cwd()));
+		try {
+			await commands.get("side")!.handler("  ", createCommandContext({ notify: (message) => notices.push(message) }));
+			assert.deepEqual(notices, ["Usage: /side <task>"]);
+			assert.equal(launches, 0);
+		} finally {
+			runtime.dispose();
+		}
+	});
+
 	it("/run accepts an agent without a task", async () => {
 		const sent: unknown[] = [];
 		const commands = new Map<string, { handler(args: string, ctx: unknown): Promise<void> }>();
