@@ -38,6 +38,17 @@ Run parallel reviewers: one for correctness, one for tests, and one for unnecess
 
 That is enough to start. Pi decides whether to call the `subagent` tool, which agent to use, and how to compose the work.
 
+## Quick side tasks
+
+Use `/side <task>` to delegate a small task directly, without asking the parent model to launch it:
+
+```text
+/side Commit the staged changes; do not push.
+/side Run the CLI query using the conditions we just discussed.
+```
+
+`/side` always uses `delegate`, the configured `fast` model class, and a fork of the current conversation. It stays in the foreground even when `forceTopLevelAsync` is enabled, and writes its completion receipt back into the parent session without automatically requesting a parent-model reply. Supervisor escalation is disabled: a blocked child returns the blocker instead. Only the task text is needed; launch flags are not parsed. Configure `subagents.modelPools.fast` first (see [Models](docs/models.md)); a missing pool fails rather than silently using the parent model. Forking requires a persisted parent session with conversation history; if unavailable, the task fails rather than losing that context. The child uses the current working directory, not an isolated worktree, so avoid concurrent edits to the same files. Only one foreground subagent can run per session; another `/side` is rejected while one is active.
+
 ## How it works
 
 Pi is the parent session. A subagent is a focused child Pi session with its own job.
