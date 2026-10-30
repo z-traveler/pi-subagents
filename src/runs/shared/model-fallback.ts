@@ -457,7 +457,9 @@ export function resolveModelRouting(input: ResolveModelRoutingInput): ModelRouti
 		} catch (error) {
 			throw new Error(`Model pool '${requestedModelClass}'${configuredPoolLabel} is invalid: ${error instanceof Error ? error.message : String(error)}`);
 		}
-		if (candidates.length !== configuredPool.length) {
+		const resolvableCandidateCount = configuredPool.filter((candidate) =>
+			resolveSubagentModelCandidate(candidate.trim(), input.availableModels, input.preferredProvider)).length;
+		if (candidates.length !== resolvableCandidateCount) {
 			throw new Error(`Model pool '${requestedModelClass}'${configuredPoolLabel} contains candidates that resolve to the same model: ${configuredPool.join(", ")}.`);
 		}
 		return {

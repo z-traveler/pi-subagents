@@ -14,6 +14,7 @@ import {
 	resolveModelRouting,
 	selectModelFailover,
 	resolveSubagentModelOverride,
+	toModelRoutingSnapshot,
 } from "../../src/runs/shared/model-fallback.ts";
 import { resolveModelScopesForAgent } from "../../src/runs/shared/model-scope.ts";
 
@@ -338,6 +339,82 @@ describe("model fallback helpers", () => {
 		assert.equal(classifyRetryEffects({ toolCount: 1, recentTools: [{ tool: "intercom", args: "{}", endMs: 1 }] }), "external-or-unknown");
 		assert.deepEqual(decideModelFailover({ category: "transient", currentModel: "openai/a", nextModel: "openai/b", effects: "workspace" }), { retry: true, mode: "resume" });
 		assert.equal(decideModelFailover({ category: "transient", currentModel: "openai/a", nextModel: "openai/b", effects: "external-or-unknown" }).retry, false);
+	});
+
+	it("named model pools skip unavailable tails while freezing available order, thinking and digest", (t) => {
+		const warnings: string[] = [];
+		t.mock.method(console, "warn", (message: unknown) => warnings.push(String(message)));
+		const candidates = ["gpt-5-mini:high", "anthropic/claude-sonnet-4:low", "claude-code/opus-missing-xyz:high"];
+		const resolved = resolveModelRouting({ explicitModelClass: "smart", modelPools: { smart: candidates }, availableModels });
+		assert.equal(resolved.primaryModel, "openai/gpt-5-mini:high");
+		assert.deepEqual(resolved.modelCandidates, ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:low"]);
+		assert.deepEqual(candidates, ["gpt-5-mini:high", "anthropic/claude-sonnet-4:low", "claude-code/opus-missing-xyz:high"]);
+		assert.equal(resolved.modelPoolDigest, resolveModelRouting({
+			explicitModelClass: "smart", modelPools: { smart: candidates.slice(0, 2) }, availableModels,
+		}).modelPoolDigest);
+		const snapshot = toModelRoutingSnapshot(resolved);
+		candidates.reverse();
+		assert.deepEqual(snapshot?.candidates, ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:low"]);
+		assert.equal(snapshot?.poolDigest, resolved.modelPoolDigest);
+		assert.deepEqual(warnings, ["[pi-subagents] Skipping fallback model 'claude-code/opus-missing-xyz:high' because it is unavailable in this environment."]);
+	});
+
+	it("named model pools preserve configured whitespace normalization", () => {
+		const resolved = resolveModelRouting({
+			explicitModelClass: "smart",
+			modelPools: { smart: [" gpt-5-mini:high ", " anthropic/claude-sonnet-4:low "] },
+			availableModels,
+		});
+		assert.deepEqual(resolved.modelCandidates, ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:low"]);
+	});
+
+	it("named model pools still reject canonical alias duplicates beside unavailable entries", (t) => {
+		t.mock.method(console, "warn", () => {});
+		assert.throws(() => resolveModelRouting({
+			explicitModelClass: "smart",
+			modelPools: { smart: ["gpt-5-mini:high", "openai/gpt-5-mini:high", "claude-code/opus-missing-xyz"] },
+			availableModels,
+		}), /Model pool 'smart'.*resolve to the same model/);
+	});
+
+	it("named model pools retain distinct thinking candidates for the same concrete model", (t) => {
+		t.mock.method(console, "warn", () => {});
+		const resolved = resolveModelRouting({
+			explicitModelClass: "smart",
+			modelPools: { smart: ["gpt-5-mini:high", "openai/gpt-5-mini:low", "claude-code/opus-missing-xyz"] },
+			availableModels,
+		});
+		assert.deepEqual(resolved.modelCandidates, ["openai/gpt-5-mini:high", "openai/gpt-5-mini:low"]);
+	});
+
+	it("named model pools promote the first available fallback when the primary is unavailable", (t) => {
+		const warnings: string[] = [];
+		t.mock.method(console, "warn", (message: unknown) => warnings.push(String(message)));
+		const resolved = resolveModelRouting({
+			explicitModelClass: "smart",
+			modelPools: { smart: ["claude-code/opus-missing-xyz", "anthropic/claude-sonnet-4:low", "gpt-5-mini:high"] },
+			availableModels,
+		});
+		assert.equal(resolved.primaryModel, "anthropic/claude-sonnet-4:low");
+		assert.deepEqual(resolved.modelCandidates, ["anthropic/claude-sonnet-4:low", "openai/gpt-5-mini:high"]);
+		assert.deepEqual(warnings, ["[pi-subagents] Skipping primary model 'claude-code/opus-missing-xyz' because it is unavailable in this environment."]);
+	});
+
+	it("named model pools preserve unknown-class and all-unavailable diagnostics", (t) => {
+		t.mock.method(console, "warn", () => {});
+		assert.throws(() => resolveModelRouting({ explicitModelClass: "missing", modelPools: {}, availableModels }), /Unknown subagent modelClass 'missing'/);
+		assert.throws(() => resolveModelRouting({
+			explicitModelClass: "smart", modelPools: { smart: ["claude-code/opus-missing-xyz", "missing-other-model"] },
+			modelPoolSources: { smart: { scope: "user", path: "/fixture/settings.json" } }, availableModels,
+		}), /Model pool 'smart' from user settings '\/fixture\/settings.json' is invalid: Unknown subagent model 'claude-code\/opus-missing-xyz'/);
+	});
+
+	it("named model pools enforce scope after skipping an unavailable primary", (t) => {
+		t.mock.method(console, "warn", () => {});
+		assert.throws(() => resolveModelRouting({
+			explicitModelClass: "smart", modelPools: { smart: ["claude-code/opus-missing-xyz", "anthropic/claude-sonnet-4"] },
+			availableModels, modelScope: { enforce: true, allow: ["openai/*"] },
+		}), /smart.*anthropic\/claude-sonnet-4.*outside.*model scope/i);
 	});
 
 	it("rejects every out-of-scope model-class candidate before launch", () => {
